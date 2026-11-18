@@ -68,6 +68,10 @@ class ExpressionSimplifier(ExprVisitorCallbackBottomToTop):
             simplifications_common.simp_bcdadd,
             simplifications_common.simp_smod_sext,
             simplifications_common.simp_flag_cst,
+            # Mixed Boolean-Arithmetic
+            simplifications_bits.simp_not_arith,
+            simplifications_bits.simp_mba_product,
+            simplifications_bits.simp_linear_mba,
         ],
 
         m2_expr.ExprSlice: [
@@ -108,9 +112,6 @@ class ExpressionSimplifier(ExprVisitorCallbackBottomToTop):
             simplifications_bits.simp_neg_to_not,
             simplifications_bits.simp_ashr_sign,
             simplifications_bits.simp_and_not,
-            simplifications_bits.simp_not_arith,
-            simplifications_bits.simp_mba_product,
-            simplifications_bits.simp_linear_mba,
             simplifications_bits.simp_mask_to_cond,
             simplifications_bits.simp_shift_add_mul,
             simplifications_bits.simp_bit_predicate_op,

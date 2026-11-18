@@ -502,6 +502,12 @@ for e_input, e_check in to_test:
 to_test = [
     (ExprOp(TOK_EQUAL, a+i2, i1), ExprOp(TOK_EQUAL, a+i1, i0)),
     (ExprOp(TOK_EQUAL, -a, -b), ExprOp(TOK_EQUAL, a, b)),
+    # Mixed Boolean-Arithmetic
+    ((a | b) - (a & b), a ^ b),
+    ((a & b) + (a | b), a + b),
+    ((a ^ b) + (a & b) * ExprInt(2, 32), a + b),
+    (a + b - (a | b), a & b),
+    ((a ^ ExprInt(-1, 32)) + ExprInt(1, 32), -a),
     (ExprOp(TOK_INF_SIGNED, a+i2, i1), ExprOp(TOK_INF_SIGNED, a+i2, i1)),
     (ExprOp(TOK_INF_UNSIGNED, a+i2, i1), ExprOp(TOK_INF_UNSIGNED, a+i2, i1)),
 

@@ -124,7 +124,9 @@ or `ExpressionSimplifier.PASS_BITS` on your own simplifier.
 * Sign idioms: `x a>> (size - 1)`, `msb(X) ? {X, -1} : {X, 0}`, `-a - 1`,
   `X & ~X`.
 
-* Mixed Boolean-Arithmetic:
+* Mixed Boolean-Arithmetic (these three passes are cheap and purely
+  syntactic: they are also part of the default `expr_simp`, so the symbolic
+  execution benefits from them directly):
   * linear MBA (sums of bitwise functions of the same words, with integer
     coefficients): `(a | b) - (a & b)` => `a ^ b`,
     `(a ^ b) + 2 * (a & b)` => `a + b`, `a + b - (a | b)` => `a & b`,
