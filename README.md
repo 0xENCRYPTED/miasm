@@ -21,10 +21,91 @@ a non-exhaustive list of features:
 
 See the official [blog](http://miasm.re) for more examples and demos.
 
+About this fork: x86 SSE / AVX support
+======================================
+
+This fork of [cea-sec/miasm](https://github.com/cea-sec/miasm) completes the
+x86 SSE support and adds AVX / AVX2 (branch `sse-support`). Everything below
+covers the disassembler, the assembler and the IR semantic; the jitter is not
+concerned.
+
+What was added
+--------------
+
+* **SSE, SSE2, SSE3, SSSE3, SSE4.1, SSE4.2**: about 65 missing mnemonics,
+  among them `RCPPS`, `RSQRTPS`, `PSHUFW`, `MOVNT*`, `LDDQU`, `MOVDDUP`,
+  `MOVSLDUP`, `MOVSHDUP`, `ADDSUBPx`, `HADDPx`, `HSUBPx`, `PABS*`, `PHADD*`,
+  `PHSUB*`, `PMADDUBSW`, `PMULHRSW`, `BLENDPD`, `BLENDVPx`, `PBLENDVB`,
+  `DPPx`, `EXTRACTPS`, `INSERTPS`, `PMOVZX*`, `ROUNDPx`, `CRC32`, `POPCNT`
+  and `PCMPESTRI` / `PCMPESTRM` / `PCMPISTRI` / `PCMPISTRM`.
+* **AES-NI and SHA**: semantic of `AESENC`, `AESENCLAST`, `AESDEC`,
+  `AESDECLAST`, `AESIMC`, `AESKEYGENASSIST` and of the seven SHA
+  instructions. The AES S-Box is modeled by two new expression operators,
+  `aes_sbox` and `aes_inv_sbox` (8 bits to 8 bits), with constant folding
+  and z3 translation; the rest of AES is expressed with standard operators.
+* **AVX and AVX2**: VEX prefix (2 and 3 byte forms), `VEX.vvvv` and `/is4`
+  operands, `YMM0`-`YMM15` registers, `YMMWORD PTR` memory operands and
+  about 280 mnemonics.
+
+Design notes
+------------
+
+* `YMMx` only exists as an instruction operand. The state is made of the
+  existing `XMMx` (low 128 bits) and a new `YMMx_H` register (high 128
+  bits). Legacy SSE code, which leaves the upper half untouched, therefore
+  keeps its previous IR.
+* A VEX encoded instruction writing an XMM register clears `YMMx_H`.
+* Most VEX instructions are the non destructive `dst, src1, src2` version of
+  a legacy SSE one, applied on each 128 bit lane. Their semantic is derived
+  from the legacy implementation (`vex_lane`, `vex_lane_unary`, `vex_full`
+  and `vex_direct` in `miasm/arch/x86/sem.py`) instead of being rewritten.
+* VEX mnemonics are declared with `addop_vex` in `miasm/arch/x86/arch.py`,
+  from the prefix, opcode map, opcode, `L` / `W` bits and operand order.
+
+Fixes in existing code
+----------------------
+
+* Segment override prefixes were dropped when assembling MMX / XMM, byte and
+  word memory operands (for instance `PADDB XMM1, XMMWORD PTR FS:[EBX]`).
+* `CVTSD2SI`, `CVTTSD2SI` and `CVTTSS2SI` decoded their destination register
+  with `REX.B` instead of `REX.R`.
+* `CVT(T)SS2SI`, `CVT(T)SD2SI` and `CVTSI2Sx` with 64 bit integer operands.
+
+How it was checked
+------------------
+
+* Encodings: every new form was decoded and re-assembled in 32 and 64 bit
+  modes, and compared with capstone. `test/arch/x86/arch.py` holds 1368 new
+  vectors.
+* Semantic: each instruction is symbolically executed from a concrete pseudo
+  random state, and the result is compared with the execution of the same
+  instruction on a real CPU. `test/arch/x86/sem_sse_avx.py` replays 1110
+  recorded reference states without needing the jitter;
+  `test/arch/x86/sem_sse_avx_native.py` regenerates them (Windows x86_64
+  host with AVX2).
+
+Known limits
+------------
+
+* Not added: gather instructions, FMA, BMI1 / BMI2, `LZCNT`, `TZCNT`,
+  `MOVBE`, `PAUSE`.
+* `RCPPS` / `RSQRTPS` (and scalar / VEX versions) return the exact value,
+  whereas a CPU returns a 12 bit approximation.
+* Rounding controlled by MXCSR is assumed to be "to nearest".
+* `VCOMISS` / `VCOMISD` reuse the existing `COMISS` / `COMISD` model, which
+  is not bit accurate.
+* `VMASKMOVPx` / `VPMASKMOVx` access the whole memory operand: fault
+  suppression on masked elements is not modeled.
+* Float operators have no z3 translation (as before); every new integer
+  instruction translates.
+* The jitter does not know the `YMMx_H` registers: AVX code cannot be
+  jitted.
+
 Table of Contents
 =================
 
 - [What is Miasm?](#user-content-what-is-miasm)
+- [About this fork: x86 SSE / AVX support](#user-content-about-this-fork-x86-sse--avx-support)
 - [Basic examples](#user-content-basic-examples)
 	- [Assembling / Disassembling](#user-content-assembling--disassembling)
 	- [Intermediate representation](#user-content-intermediate-representation)
