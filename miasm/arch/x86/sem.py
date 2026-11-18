@@ -4794,11 +4794,6 @@ def pmovsxwq(ir, instr, dst, src):
     e.append(m2_expr.ExprAssign(dst, m2_expr.ExprCompose(*out)))
     return e, []
 
-def pmovmskb(ir, instr, dst, src):
-    e = []
-    e.append(m2_expr.ExprAssign(dst, src.zeroExtend(dst.size)))
-    return e, []
-
 def pmovsxb(dst, src, count, out_size):
     if dst.size != 128:
         raise RuntimeError("Unsupported size %d" % dst.size)
