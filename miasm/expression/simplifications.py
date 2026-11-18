@@ -9,6 +9,7 @@ from future.utils import viewitems
 from miasm.expression import simplifications_common
 from miasm.expression import simplifications_cond
 from miasm.expression import simplifications_explicit
+from miasm.expression import simplifications_bits
 from miasm.expression.expression_helper import fast_unify
 import miasm.expression.expression as m2_expr
 from miasm.expression.expression import ExprVisitorCallbackBottomToTop
@@ -99,6 +100,27 @@ class ExpressionSimplifier(ExprVisitorCallbackBottomToTop):
 
     # Heavy passes
     PASS_HEAVY = {}
+
+    # Bit level passes: bit-blasted / bit-serial / bit-sliced computations
+    PASS_BITS = {
+        m2_expr.ExprOp: [
+            simplifications_bits.simp_1bit_arith,
+            simplifications_bits.simp_mask_to_cond,
+            simplifications_bits.simp_shift_add_mul,
+            simplifications_bits.simp_bit_predicate_op,
+        ],
+        m2_expr.ExprSlice: [
+            simplifications_bits.simp_slice_signext_bit,
+        ],
+        m2_expr.ExprCompose: [
+            simplifications_bits.simp_compose_lift,
+            simplifications_bits.simp_compose_arith,
+        ],
+        m2_expr.ExprCond: [
+            simplifications_bits.simp_1bit_cond,
+            simplifications_bits.simp_bit_predicate_cond,
+        ],
+    }
 
     # Cond passes
     PASS_COND = {
@@ -195,6 +217,11 @@ expr_simp.enable_passes(ExpressionSimplifier.PASS_COMMONS)
 
 expr_simp_high_to_explicit = ExpressionSimplifier()
 expr_simp_high_to_explicit.enable_passes(ExpressionSimplifier.PASS_HIGH_TO_EXPLICIT)
+
+# Simplifier with the bit level passes
+expr_simp_bits = ExpressionSimplifier()
+expr_simp_bits.enable_passes(ExpressionSimplifier.PASS_COMMONS)
+expr_simp_bits.enable_passes(ExpressionSimplifier.PASS_BITS)
 
 expr_simp_explicit = ExpressionSimplifier()
 expr_simp_explicit.enable_passes(ExpressionSimplifier.PASS_COMMONS)

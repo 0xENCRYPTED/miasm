@@ -89,6 +89,43 @@ How it was checked
   `test/arch/x86/sem_sse_avx_native.py` regenerates them (Windows x86_64
   host with AVX2).
 
+Bit level simplifications
+-------------------------
+
+`miasm/expression/simplifications_bits.py` adds simplification passes for
+bit-blasted, bit-serial and bit-sliced computations (word operations computed
+bit by bit). They are opt-in:
+
+```python
+from miasm.expression.simplifications import expr_simp_bits
+expr = expr_simp_bits(expr)
+```
+
+or `ExpressionSimplifier.PASS_BITS` on your own simplifier.
+
+* 1 bit arithmetic (`a + b` => `a ^ b`, `a * b` => `a & b`, ...), masks made
+  of a replicated bit (`X & signExt(c)` => `c ? X : 0`).
+* Lifting of an operation applied on each element of an `ExprCompose`:
+  `{a[0:1] ^ b[0:1], a[1:2] ^ b[1:2], ...}` => `a ^ b`, including constant
+  or shared operands, multiplexers and elements wider than one bit.
+* Bit-serial additions and subtractions (`+/-A +/-B +/-carry + constant`),
+  with zero extended results and carry out.
+* Bit-serial comparisons: `==`, `<u`, `<=u`, `<s`, `<=s` between two words,
+  equality of a word with a constant.
+* Shift-and-add multiplication.
+
+Additions and comparisons are recognized semantically: the expression is
+bit-blasted to a BDD and compared with the BDD of word level candidates
+(after a random simulation filter), so the result does not depend on how
+the adder or the comparator is written, and is exact. With the variable
+order used, an adder BDD is linear; a 256 bit ripple carry adder is
+recognized in a few seconds.
+
+Not handled: multiplications other than shift-and-add, divisions, sums of
+more than two words in a single adder (nested adders are), carry-save or
+other non ripple structures only as far as they stay equivalent bit for bit
+to one of the candidates.
+
 Known limits
 ------------
 

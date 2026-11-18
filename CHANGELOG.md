@@ -7,6 +7,8 @@
 - x86: VEX prefix, YMM registers, AVX and AVX2 instructions (disassembler,
   assembler and semantic)
 - `aes_sbox` / `aes_inv_sbox` operators (simplification and z3 translation)
+- Bit level simplifications (`expr_simp_bits`): lifting of bit-sliced
+  operations, recognition of bit-serial adders, comparators and multipliers
 
 ## 0.1.5 - 2023-04-18
 ### Fixed
