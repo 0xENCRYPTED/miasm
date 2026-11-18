@@ -134,6 +134,12 @@ tests = [
     (ExprCond(c, ONE, ZERO), c),
     (ExprCond(c, ZERO, ONE), c ^ ONE),
 
+    # Two's complement
+    (-a + ExprInt(-1, 32), a ^ ExprInt(-1, 32)),
+    (-a + b + ExprInt(-1, 32), (a ^ ExprInt(-1, 32)) + b),
+    # LEA r8, [rcx + 1]; SUB rdx, r8 with rdx = 0
+    (-(a + ExprInt(1, 32)), a ^ ExprInt(-1, 32)),
+
     # Masks
     (c.signExtend(8)[7:8], c),
     (c.signExtend(32)[8:16], c.signExtend(8)),

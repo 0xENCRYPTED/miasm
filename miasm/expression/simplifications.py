@@ -105,6 +105,7 @@ class ExpressionSimplifier(ExprVisitorCallbackBottomToTop):
     PASS_BITS = {
         m2_expr.ExprOp: [
             simplifications_bits.simp_1bit_arith,
+            simplifications_bits.simp_neg_to_not,
             simplifications_bits.simp_mask_to_cond,
             simplifications_bits.simp_shift_add_mul,
             simplifications_bits.simp_bit_predicate_op,

@@ -75,6 +75,26 @@ def simp_1bit_arith(_, expr):
     return expr
 
 
+def simp_neg_to_not(_, expr):
+    """Two's complement: -a - 1 => a ^ -1
+    (-a) + 0xFF..FF + X => (a ^ 0xFF..FF) + X
+    """
+    if expr.op != "+" or len(expr.args) < 2:
+        return expr
+    args = list(expr.args)
+    constant = args[-1]
+    if not (constant.is_int() and int(constant) == int(expr.mask)):
+        return expr
+    for index, arg in enumerate(args[:-1]):
+        if arg.is_op("-") and len(arg.args) == 1:
+            args[index] = arg.args[0] ^ constant
+            args.pop()
+            if len(args) == 1:
+                return args[0]
+            return ExprOp("+", *args)
+    return expr
+
+
 def simp_1bit_cond(_, expr):
     """c ? 1 : 0 => c, c ? 0 : 1 => c ^ 1 (c on 1 bit)"""
     if expr.size != 1 or expr.cond.size != 1:
