@@ -84,9 +84,11 @@ class ArchUnitTest(RegressionTest):
 
 # script -> blacklisted jitter
 blacklist = {
-    "x86/unit/mn_float.py": ["python", "llvm"],
+    # The C translator (gcc engine) lacks the AES and rounding operators
+    "x86/sem_sse_avx_jit.py": ["gcc"],
 }
 for script in ["x86/sem.py",
+               "x86/sem_sse_avx_jit.py",
                "x86/unit/mn_strings.py",
                "x86/unit/mn_float.py",
                "x86/unit/mn_stack.py",

@@ -2,6 +2,7 @@ from miasm.core.utils import decode_hex, encode_hex
 import miasm.expression.expression as m2_expr
 from miasm.ir.symbexec import SymbolicExecutionEngine
 from miasm.arch.x86.arch import is_op_segm
+from miasm.expression.simplifications_float import simp_float_cst
 
 
 class EmulatedSymbExec(SymbolicExecutionEngine):
@@ -161,10 +162,29 @@ class EmulatedSymbExec(SymbolicExecutionEngine):
         # Not found error is keeped on purpose
         return m2_expr.ExprInt(self.x86_cpuid[a][reg_num], expr.size)
 
+    # Extended control registers: XCR0 = x87 | SSE | AVX state enabled
+    x86_xgetbv = {0: 0x7}
+
+    def _simp_handle_x86_xgetbv(self, e_s, expr):
+        """XGETBV: low (0) or high (1) half of an extended control register"""
+        if expr.op != "x86_xgetbv":
+            return expr
+        if any(not arg.is_int() for arg in expr.args):
+            return expr
+        index, half = (int(arg) for arg in expr.args)
+        value = self.x86_xgetbv.get(index, 0)
+        return m2_expr.ExprInt((value >> (32 * half)) & 0xFFFFFFFF, expr.size)
+
     def enable_emulated_simplifications(self):
         """Enable simplifications needing a CPU instance on associated
         ExpressionSimplifier
         """
         self.expr_simp.enable_passes({
-            m2_expr.ExprOp: [self._simp_handle_segm, self._simp_handle_x86_cpuid],
+            m2_expr.ExprOp: [
+                self._simp_handle_segm,
+                self._simp_handle_x86_cpuid,
+                self._simp_handle_x86_xgetbv,
+                # Floating point operators (SSE / AVX)
+                simp_float_cst,
+            ],
         })

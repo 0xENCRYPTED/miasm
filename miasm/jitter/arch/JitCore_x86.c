@@ -75,6 +75,22 @@ reg_dict gpreg_dict[] = {
 			 {.name = "XMM13", .offset = offsetof(struct vm_cpu, XMM13), .size = 128},
 			 {.name = "XMM14", .offset = offsetof(struct vm_cpu, XMM14), .size = 128},
 			 {.name = "XMM15", .offset = offsetof(struct vm_cpu, XMM15), .size = 128},
+			 {.name = "YMM0_H", .offset = offsetof(struct vm_cpu, YMM0_H), .size = 128},
+			 {.name = "YMM1_H", .offset = offsetof(struct vm_cpu, YMM1_H), .size = 128},
+			 {.name = "YMM2_H", .offset = offsetof(struct vm_cpu, YMM2_H), .size = 128},
+			 {.name = "YMM3_H", .offset = offsetof(struct vm_cpu, YMM3_H), .size = 128},
+			 {.name = "YMM4_H", .offset = offsetof(struct vm_cpu, YMM4_H), .size = 128},
+			 {.name = "YMM5_H", .offset = offsetof(struct vm_cpu, YMM5_H), .size = 128},
+			 {.name = "YMM6_H", .offset = offsetof(struct vm_cpu, YMM6_H), .size = 128},
+			 {.name = "YMM7_H", .offset = offsetof(struct vm_cpu, YMM7_H), .size = 128},
+			 {.name = "YMM8_H", .offset = offsetof(struct vm_cpu, YMM8_H), .size = 128},
+			 {.name = "YMM9_H", .offset = offsetof(struct vm_cpu, YMM9_H), .size = 128},
+			 {.name = "YMM10_H", .offset = offsetof(struct vm_cpu, YMM10_H), .size = 128},
+			 {.name = "YMM11_H", .offset = offsetof(struct vm_cpu, YMM11_H), .size = 128},
+			 {.name = "YMM12_H", .offset = offsetof(struct vm_cpu, YMM12_H), .size = 128},
+			 {.name = "YMM13_H", .offset = offsetof(struct vm_cpu, YMM13_H), .size = 128},
+			 {.name = "YMM14_H", .offset = offsetof(struct vm_cpu, YMM14_H), .size = 128},
+			 {.name = "YMM15_H", .offset = offsetof(struct vm_cpu, YMM15_H), .size = 128},
 
 			 {.name = "tsc", .offset = offsetof(struct vm_cpu, tsc), .size = 64},
 
@@ -156,6 +172,22 @@ PyObject* cpu_get_gpreg(JitCpu* self)
     get_reg_bn(XMM13, 128);
     get_reg_bn(XMM14, 128);
     get_reg_bn(XMM15, 128);
+    get_reg_bn(YMM0_H, 128);
+    get_reg_bn(YMM1_H, 128);
+    get_reg_bn(YMM2_H, 128);
+    get_reg_bn(YMM3_H, 128);
+    get_reg_bn(YMM4_H, 128);
+    get_reg_bn(YMM5_H, 128);
+    get_reg_bn(YMM6_H, 128);
+    get_reg_bn(YMM7_H, 128);
+    get_reg_bn(YMM8_H, 128);
+    get_reg_bn(YMM9_H, 128);
+    get_reg_bn(YMM10_H, 128);
+    get_reg_bn(YMM11_H, 128);
+    get_reg_bn(YMM12_H, 128);
+    get_reg_bn(YMM13_H, 128);
+    get_reg_bn(YMM14_H, 128);
+    get_reg_bn(YMM15_H, 128);
 
     get_reg(tsc);
 
@@ -618,6 +650,22 @@ getset_reg_bn(XMM12, 128);
 getset_reg_bn(XMM13, 128);
 getset_reg_bn(XMM14, 128);
 getset_reg_bn(XMM15, 128);
+getset_reg_bn(YMM0_H, 128);
+getset_reg_bn(YMM1_H, 128);
+getset_reg_bn(YMM2_H, 128);
+getset_reg_bn(YMM3_H, 128);
+getset_reg_bn(YMM4_H, 128);
+getset_reg_bn(YMM5_H, 128);
+getset_reg_bn(YMM6_H, 128);
+getset_reg_bn(YMM7_H, 128);
+getset_reg_bn(YMM8_H, 128);
+getset_reg_bn(YMM9_H, 128);
+getset_reg_bn(YMM10_H, 128);
+getset_reg_bn(YMM11_H, 128);
+getset_reg_bn(YMM12_H, 128);
+getset_reg_bn(YMM13_H, 128);
+getset_reg_bn(YMM14_H, 128);
+getset_reg_bn(YMM15_H, 128);
 
 getset_reg_u64(tsc);
 
@@ -709,6 +757,22 @@ PyObject* get_gpreg_offset_all(void)
     get_reg_off(XMM13);
     get_reg_off(XMM14);
     get_reg_off(XMM15);
+    get_reg_off(YMM0_H);
+    get_reg_off(YMM1_H);
+    get_reg_off(YMM2_H);
+    get_reg_off(YMM3_H);
+    get_reg_off(YMM4_H);
+    get_reg_off(YMM5_H);
+    get_reg_off(YMM6_H);
+    get_reg_off(YMM7_H);
+    get_reg_off(YMM8_H);
+    get_reg_off(YMM9_H);
+    get_reg_off(YMM10_H);
+    get_reg_off(YMM11_H);
+    get_reg_off(YMM12_H);
+    get_reg_off(YMM13_H);
+    get_reg_off(YMM14_H);
+    get_reg_off(YMM15_H);
 
     get_reg_off(tsc);
 
@@ -818,6 +882,22 @@ static PyGetSetDef JitCpu_getseters[] = {
     {"XMM13", (getter)JitCpu_get_XMM13, (setter)JitCpu_set_XMM13, "XMM13", NULL},
     {"XMM14", (getter)JitCpu_get_XMM14, (setter)JitCpu_set_XMM14, "XMM14", NULL},
     {"XMM15", (getter)JitCpu_get_XMM15, (setter)JitCpu_set_XMM15, "XMM15", NULL},
+    {"YMM0_H", (getter)JitCpu_get_YMM0_H, (setter)JitCpu_set_YMM0_H, "YMM0_H", NULL},
+    {"YMM1_H", (getter)JitCpu_get_YMM1_H, (setter)JitCpu_set_YMM1_H, "YMM1_H", NULL},
+    {"YMM2_H", (getter)JitCpu_get_YMM2_H, (setter)JitCpu_set_YMM2_H, "YMM2_H", NULL},
+    {"YMM3_H", (getter)JitCpu_get_YMM3_H, (setter)JitCpu_set_YMM3_H, "YMM3_H", NULL},
+    {"YMM4_H", (getter)JitCpu_get_YMM4_H, (setter)JitCpu_set_YMM4_H, "YMM4_H", NULL},
+    {"YMM5_H", (getter)JitCpu_get_YMM5_H, (setter)JitCpu_set_YMM5_H, "YMM5_H", NULL},
+    {"YMM6_H", (getter)JitCpu_get_YMM6_H, (setter)JitCpu_set_YMM6_H, "YMM6_H", NULL},
+    {"YMM7_H", (getter)JitCpu_get_YMM7_H, (setter)JitCpu_set_YMM7_H, "YMM7_H", NULL},
+    {"YMM8_H", (getter)JitCpu_get_YMM8_H, (setter)JitCpu_set_YMM8_H, "YMM8_H", NULL},
+    {"YMM9_H", (getter)JitCpu_get_YMM9_H, (setter)JitCpu_set_YMM9_H, "YMM9_H", NULL},
+    {"YMM10_H", (getter)JitCpu_get_YMM10_H, (setter)JitCpu_set_YMM10_H, "YMM10_H", NULL},
+    {"YMM11_H", (getter)JitCpu_get_YMM11_H, (setter)JitCpu_set_YMM11_H, "YMM11_H", NULL},
+    {"YMM12_H", (getter)JitCpu_get_YMM12_H, (setter)JitCpu_set_YMM12_H, "YMM12_H", NULL},
+    {"YMM13_H", (getter)JitCpu_get_YMM13_H, (setter)JitCpu_set_YMM13_H, "YMM13_H", NULL},
+    {"YMM14_H", (getter)JitCpu_get_YMM14_H, (setter)JitCpu_set_YMM14_H, "YMM14_H", NULL},
+    {"YMM15_H", (getter)JitCpu_get_YMM15_H, (setter)JitCpu_set_YMM15_H, "YMM15_H", NULL},
 
     {"tsc", (getter)JitCpu_get_tsc, (setter)JitCpu_set_tsc, "tsc", NULL},
 

@@ -119,6 +119,22 @@ struct vm_cpu {
 	bn_t XMM13;
 	bn_t XMM14;
 	bn_t XMM15;
+	bn_t YMM0_H;
+	bn_t YMM1_H;
+	bn_t YMM2_H;
+	bn_t YMM3_H;
+	bn_t YMM4_H;
+	bn_t YMM5_H;
+	bn_t YMM6_H;
+	bn_t YMM7_H;
+	bn_t YMM8_H;
+	bn_t YMM9_H;
+	bn_t YMM10_H;
+	bn_t YMM11_H;
+	bn_t YMM12_H;
+	bn_t YMM13_H;
+	bn_t YMM14_H;
+	bn_t YMM15_H;
 
 	uint64_t segm_base[0x10000];
 

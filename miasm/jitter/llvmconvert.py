@@ -32,6 +32,7 @@ import miasm.core.asmblock as m2_asmblock
 from miasm.core.utils import size2mask
 from miasm.jitter.codegen import CGen, Attributes
 from miasm.expression.expression_helper import possible_values
+from miasm.expression.expression_helper import AES_SBOX, AES_INV_SBOX
 
 
 class LLVMType(llvm_ir.Type):
@@ -167,6 +168,16 @@ class LLVMContext(object):
                                      "args": [dtype]},
               "llvm.trunc.f32": {"ret": ftype,
                                  "args": [ftype]},
+              "llvm.trunc.f64": {"ret": dtype,
+                                 "args": [dtype]},
+              "llvm.floor.f32": {"ret": ftype,
+                                 "args": [ftype]},
+              "llvm.floor.f64": {"ret": dtype,
+                                 "args": [dtype]},
+              "llvm.ceil.f32": {"ret": ftype,
+                                "args": [ftype]},
+              "llvm.ceil.f64": {"ret": dtype,
+                                "args": [dtype]},
               "segm2addr": {"ret": itype,
                             "args": [p8,
                                      itype,
@@ -1030,6 +1041,50 @@ class LLVMFunction(object):
                 self.update_cache(expr, ret)
                 return ret
 
+            if op in ("ucomiss_zf", "ucomiss_pf", "ucomiss_cf",
+                      "ucomisd_zf", "ucomisd_pf", "ucomisd_cf"):
+                # Unordered compare: ZF, PF, CF = 111 if unordered,
+                # 100 if equal, 001 if lower, 000 if greater
+                fptype = LLVMType.fptype(expr.args[0].size)
+                arg1 = builder.bitcast(self.add_ir(expr.args[0]), fptype)
+                arg2 = builder.bitcast(self.add_ir(expr.args[1]), fptype)
+                kind = op[-2:]
+                if kind == "zf":
+                    ret = builder.fcmp_unordered("==", arg1, arg2)
+                elif kind == "pf":
+                    ret = builder.fcmp_unordered("uno", arg1, arg2)
+                else:
+                    ret = builder.fcmp_unordered("<", arg1, arg2)
+                self.update_cache(expr, ret)
+                return ret
+
+            if op in ("aes_sbox", "aes_inv_sbox"):
+                # Lookup in a constant table
+                table = AES_SBOX if op == "aes_sbox" else AES_INV_SBOX
+                i8 = llvm_ir.IntType(8)
+                vector = llvm_ir.Constant(
+                    llvm_ir.VectorType(i8, 256),
+                    [i8(value) for value in table]
+                )
+                index = builder.zext(self.add_ir(expr.args[0]),
+                                     llvm_ir.IntType(32))
+                ret = builder.extract_element(vector, index)
+                self.update_cache(expr, ret)
+                return ret
+
+            if op == "x86_xgetbv":
+                # XCR0 = x87 | SSE | AVX state enabled
+                itype = llvm_ir.IntType(expr.size)
+                index = self.add_ir(expr.args[0])
+                half = self.add_ir(expr.args[1])
+                is_xcr0_low = builder.and_(
+                    builder.icmp_unsigned("==", index, index.type(0)),
+                    builder.icmp_unsigned("==", half, half.type(0)),
+                )
+                ret = builder.select(is_xcr0_low, itype(7), itype(0))
+                self.update_cache(expr, ret)
+                return ret
+
             if op == "sint_to_fp":
                 fptype = LLVMType.fptype(expr.size)
                 arg = self.add_ir(expr.args[0])
@@ -1052,7 +1107,21 @@ class LLVMFunction(object):
                 else:
                     raise RuntimeError("Unsupported size")
                 rounded = builder.call(func, [arg])
-                ret = builder.fptoui(rounded, llvm_ir.IntType(expr.size))
+                # Out of range values (and NaN) give the "integer
+                # indefinite" value, as the x86 conversions do
+                itype = llvm_ir.IntType(expr.size)
+                limit = float(1 << (expr.size - 1))
+                in_range = builder.and_(
+                    builder.fcmp_ordered(
+                        ">=", rounded, llvm_ir.Constant(fptype_orig, -limit)),
+                    builder.fcmp_ordered(
+                        "<", rounded, llvm_ir.Constant(fptype_orig, limit)),
+                )
+                ret = builder.select(
+                    in_range,
+                    builder.fptosi(rounded, itype),
+                    llvm_ir.Constant(itype, 1 << (expr.size - 1))
+                )
                 self.update_cache(expr, ret)
                 return ret
 
@@ -1079,10 +1148,16 @@ class LLVMFunction(object):
                 fptype = LLVMType.fptype(expr.size)
                 arg = self.add_ir(expr.args[0])
                 arg = builder.bitcast(arg, fptype)
-                if op == "fpround_towardszero" and expr.size == 32:
-                    fc = self.mod.get_global("llvm.trunc.f32")
-                else:
-                    raise RuntimeError("Not supported, same size")
+                intrinsic = {
+                    "fpround_towardsnearest": "nearbyint",
+                    "fpround_down": "floor",
+                    "fpround_up": "ceil",
+                    "fpround_towardszero": "trunc",
+                }.get(op)
+                if intrinsic is None or expr.size not in (32, 64):
+                    raise RuntimeError("Unsupported rounding: %s" % op)
+                fc = self.mod.get_global(
+                    "llvm.%s.f%d" % (intrinsic, expr.size))
                 rounded = builder.call(fc, [arg])
                 ret = builder.bitcast(rounded, llvm_ir.IntType(expr.size))
                 self.update_cache(expr, ret)
