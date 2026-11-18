@@ -1089,6 +1089,7 @@ def simp_cmp_bijective_op(expr_simp, expr):
 
     X + A == X + B => A == B
     X ^ A == X ^ B => A == B
+    -A == -B => A == B
 
     TODO:
     3 * A + B == A + C => 2 * A + B == C
@@ -1102,6 +1103,11 @@ def simp_cmp_bijective_op(expr_simp, expr):
     # a == a
     if op_a == op_b:
         return ExprInt(1, 1)
+
+    # -a == -b => a == b (the negation is a bijection modulo 2^n)
+    if (op_a.is_op("-") and len(op_a.args) == 1 and
+        op_b.is_op("-") and len(op_b.args) == 1):
+        return ExprOp(TOK_EQUAL, op_a.args[0], op_b.args[0])
 
     # Case:
     # a + b + c == a

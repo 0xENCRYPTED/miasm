@@ -501,6 +501,7 @@ for e_input, e_check in to_test:
 # Test high level op
 to_test = [
     (ExprOp(TOK_EQUAL, a+i2, i1), ExprOp(TOK_EQUAL, a+i1, i0)),
+    (ExprOp(TOK_EQUAL, -a, -b), ExprOp(TOK_EQUAL, a, b)),
     (ExprOp(TOK_INF_SIGNED, a+i2, i1), ExprOp(TOK_INF_SIGNED, a+i2, i1)),
     (ExprOp(TOK_INF_UNSIGNED, a+i2, i1), ExprOp(TOK_INF_UNSIGNED, a+i2, i1)),
 
