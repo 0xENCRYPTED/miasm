@@ -155,6 +155,35 @@ more than two words in a single adder (nested adders are), carry-save or
 other non ripple structures only as far as they stay equivalent bit for bit
 to one of the candidates.
 
+Symbolic execution helpers
+--------------------------
+
+* **No internal IR block.** By default, a shift or a rotation by `CL`, a
+  `CMOVcc` or a string instruction is lifted with internal IR blocks (the
+  flags are not modified if the count is null, the direction depends on
+  `df`): the symbolic execution stops on a symbolic condition. Two lifter
+  attributes remove them:
+
+  ```python
+  lifter.flatten_internal_branches = True  # conditions become ExprCond values
+  lifter.assume_df_zero = True             # ABI: df is clear
+  ```
+
+  The flattened IR was checked against the default one by executing both on
+  random states.
+* **Reading the image.** `SymbolicExecutionEngineImage(lifter, bin_stream,
+  read_only=[(start, stop), ...])` returns the bytes of the binary for the
+  reads at constant, never written, read only addresses.
+* **Sample then prove.** `miasm.expression.proof.find_constant(expr)`
+  evaluates an expression on random inputs and, if the value never changes,
+  proves with z3 that it is constant. The result is `PROVEN`, `SAMPLED` (no
+  proof), `REFUTED` or `UNKNOWN`. `prove_equal(expr1, expr2)` does the same
+  for an equivalence. This is the fallback for the obfuscated values out of
+  reach of the simplifications (non linear MBA, comparisons inside sums).
+* **Win64 calls.** `LifterModelCall_x86_64_Win64`: arguments in `RCX`,
+  `RDX`, `R8`, `R9`, result in `RAX`, stack pointer preserved, volatile
+  registers clobbered.
+
 Known limits
 ------------
 

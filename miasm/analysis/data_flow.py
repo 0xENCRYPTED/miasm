@@ -841,15 +841,28 @@ def retrieve_stack_accesses(lifter, ircfg):
         base_to_interval[addr] = var_interval
     if not base_to_interval:
         return {}
-    # Check if not intervals overlap
-    _, tmp = base_to_interval.popitem()
-    while base_to_interval:
-        addr, mem = base_to_interval.popitem()
-        assert (tmp & mem).empty
-        tmp += mem
+    # Slots overlapping an other one (for instance a 128 bit access and a 16
+    # bit one in the same area) cannot be replaced by independent variables:
+    # they are left as memory accesses
+    conflicts = set()
+    slots = sorted(
+        ((addr, mem) for addr, mem in viewitems(base_to_interval)
+         if not mem.empty),
+        key=lambda item: item[1].hull()
+    )
+    for index, (addr1, mem1) in enumerate(slots):
+        stop = mem1.hull()[1]
+        for addr2, mem2 in slots[index + 1:]:
+            if mem2.hull()[0] > stop:
+                break
+            if not (mem1 & mem2).empty:
+                conflicts.add(addr1)
+                conflicts.add(addr2)
 
     base_to_info = {}
     for addr, vars in viewitems(base_to_var):
+        if addr in conflicts:
+            continue
         name = "var_%d" % (len(base_to_info))
         size = max([var.size for var in vars])
         base_to_info[addr] = size, name

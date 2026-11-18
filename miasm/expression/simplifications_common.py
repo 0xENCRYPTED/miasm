@@ -1514,6 +1514,7 @@ def simp_slice_of_op_ext(expr_s, expr):
     """
     (X.zeroExt() + {Z, } + ... + Int)[0:8] => X + ... + int[:]
     (X.zeroExt() | ... | Int)[0:8] => X | ... | int[:]
+    (X.signExt() * Y.signExt())[0:64] => X * Y (low half of IMUL)
     ...
     """
     if expr.start != 0:
@@ -1521,15 +1522,17 @@ def simp_slice_of_op_ext(expr_s, expr):
     src = expr.arg
     if not src.is_op():
         return expr
-    if src.op not in ['+', '|', '^', '&']:
+    if src.op not in ['+', '*', '|', '^', '&']:
         return expr
     is_ok = True
     for arg in src.args:
         if arg.is_int():
             continue
+        # The low bits of a sum / product only depend on the low bits of
+        # the operands: the kind of extension does not matter
         if (arg.is_op() and
-            arg.op.startswith("zeroExt") and
-            arg.args[0].size == expr.stop):
+            (arg.op.startswith("zeroExt") or arg.op.startswith("signExt")) and
+            arg.args[0].size >= expr.stop):
             continue
         if arg.is_compose():
             continue

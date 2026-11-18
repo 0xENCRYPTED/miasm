@@ -61,6 +61,8 @@ testset += RegressionTest(["x86/arch.py"], base_dir="arch",
 
 # SSE / AVX semantic, without jitter
 testset += RegressionTest(["x86/sem_sse_avx.py"], base_dir="arch")
+# Lifter options, image backed symbolic execution, without jitter
+testset += RegressionTest(["x86/sem_misc.py"], base_dir="arch")
 
 testset += RegressionTest(["arm/arch.py"], base_dir="arch")
 testset += RegressionTest(["aarch64/arch.py"], base_dir="arch")
@@ -332,6 +334,7 @@ for script in ["expression.py",
                "stp.py",
                "simplifications.py",
                "simplifications_bits.py",
+               "proof.py",
                "expression_helper.py",
                "expr_pickle.py",
                "parser.py",

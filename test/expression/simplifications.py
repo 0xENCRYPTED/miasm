@@ -502,6 +502,10 @@ for e_input, e_check in to_test:
 to_test = [
     (ExprOp(TOK_EQUAL, a+i2, i1), ExprOp(TOK_EQUAL, a+i1, i0)),
     (ExprOp(TOK_EQUAL, -a, -b), ExprOp(TOK_EQUAL, a, b)),
+    # Low half of a widening multiplication (IMUL / MUL)
+    ((a.signExtend(64) * b.signExtend(64))[:32], a * b),
+    ((a.zeroExtend(64) * b.zeroExtend(64))[:32], a * b),
+    ((a.signExtend(64) * b.signExtend(64))[:16], a[:16] * b[:16]),
     # Mixed Boolean-Arithmetic
     ((a | b) - (a & b), a ^ b),
     ((a & b) + (a | b), a + b),

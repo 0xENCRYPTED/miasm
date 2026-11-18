@@ -1130,3 +1130,92 @@ class SymbolicExecutionEngine(object):
         @src: source Expression
         """
         self.symbols.write(dst, src)
+
+
+class SymbolicExecutionEngineImage(SymbolicExecutionEngine):
+    """Symbolic execution engine reading the unknown memory from a binary
+    image.
+
+    A memory read at a constant address which was never written during the
+    execution returns the bytes of the image, if the address is in a
+    read only area. Other reads behave as in SymbolicExecutionEngine.
+
+    Example:
+        cont = Container.from_stream(open(path, "rb"), loc_db)
+        sb = SymbolicExecutionEngineImage(
+            lifter, cont.bin_stream,
+            # .text and .rdata, but not .data
+            read_only=[(0x140001000, 0x140020000)]
+        )
+    """
+
+    def __init__(self, lifter, bin_stream, state=None, read_only=None,
+                 little_endian=True, **kwargs):
+        """
+        @bin_stream: bin_stream instance (for instance Container.bin_stream)
+        @read_only: describes the addresses whose content never changes:
+            - None: every address of the image
+            - a list of (start, stop) address ranges (stop excluded)
+            - a function (address, size in bytes) -> bool
+        @little_endian: byte order of the memory
+        """
+        super(SymbolicExecutionEngineImage, self).__init__(
+            lifter, state, **kwargs)
+        self.bin_stream = bin_stream
+        self.little_endian = little_endian
+        if read_only is None:
+            self._is_read_only = lambda addr, size: True
+        elif callable(read_only):
+            self._is_read_only = read_only
+        else:
+            ranges = list(read_only)
+            self._is_read_only = lambda addr, size: any(
+                start <= addr and addr + size <= stop
+                for start, stop in ranges
+            )
+
+    def read_image(self, addr, size):
+        """Return the @size bytes at @addr as an integer, or None if they
+        are not available / not read only"""
+        if not self._is_read_only(addr, size):
+            return None
+        try:
+            data = self.bin_stream.getbytes(addr, size)
+        except (IOError, ValueError):
+            return None
+        if data is None or len(data) != size:
+            return None
+        return int.from_bytes(data, "little" if self.little_endian else "big")
+
+    def _from_image(self, expr):
+        """Replace @expr by its content in the image, if possible"""
+        if not (expr.is_mem() and expr.ptr.is_int() and expr.size % 8 == 0):
+            return expr
+        value = self.read_image(int(expr.ptr), expr.size // 8)
+        if value is None:
+            return expr
+        return ExprInt(value, expr.size)
+
+    def mem_read(self, expr):
+        value = super(SymbolicExecutionEngineImage, self).mem_read(expr)
+        if value == expr:
+            # Never written
+            return self._from_image(expr)
+        if value.is_compose():
+            # Partially written: complete the unknown parts
+            args = []
+            modified = False
+            for arg in value.args:
+                new_arg = arg
+                if arg.is_mem():
+                    new_arg = self._from_image(arg)
+                elif arg.is_slice() and arg.arg.is_mem():
+                    content = self._from_image(arg.arg)
+                    if content != arg.arg:
+                        new_arg = self.expr_simp(
+                            content[arg.start:arg.stop])
+                modified |= new_arg != arg
+                args.append(new_arg)
+            if modified:
+                return self.expr_simp(ExprCompose(*args))
+        return value

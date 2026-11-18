@@ -7,8 +7,18 @@
 - x86: VEX prefix, YMM registers, AVX and AVX2 instructions (disassembler,
   assembler and semantic)
 - `aes_sbox` / `aes_inv_sbox` operators (simplification and z3 translation)
+- Mixed Boolean-Arithmetic simplifications in the default `expr_simp`
+- `miasm.expression.proof`: sample then prove (constants, equivalences)
+- `SymbolicExecutionEngineImage`: symbolic execution reading the image
+- x86 lifter options `flatten_internal_branches` and `assume_df_zero`
+- x86: `XGETBV` semantic, `LifterModelCall_x86_64_Win64`
 - Bit level simplifications (`expr_simp_bits`): lifting of bit-sliced
   operations, recognition of bit-serial adders, comparators and multipliers
+### Fixed
+- x86: `SMSW` on a 64 bit register
+- `replace_stack_vars`: overlapping stack slots are skipped instead of
+  raising an assertion
+- low half of `IMUL` / `MUL` products is simplified to a plain product
 
 ## 0.1.5 - 2023-04-18
 ### Fixed

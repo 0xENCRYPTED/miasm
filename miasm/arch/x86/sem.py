@@ -3478,6 +3478,18 @@ def cpuid(_, instr):
     return e, []
 
 
+def xgetbv(_, instr):
+    """EDX:EAX = extended control register selected by ECX. Like CPUID, the
+    value depends on the machine: it is modeled by an operator"""
+    index = mRCX[32]
+    e = []
+    e.append(m2_expr.ExprAssign(
+        mRAX[32], m2_expr.ExprOp('x86_xgetbv', index, m2_expr.ExprInt(0, 32))))
+    e.append(m2_expr.ExprAssign(
+        mRDX[32], m2_expr.ExprOp('x86_xgetbv', index, m2_expr.ExprInt(1, 32))))
+    return e, []
+
+
 def bittest_get(ir, instr, src, index):
     index = index.zeroExtend(src.size)
     if isinstance(src, m2_expr.ExprMem):
@@ -4915,7 +4927,8 @@ def pmovmskb(_, instr, dst, src):
 def smsw(ir, instr, dst):
     e = []
     LOG_X86_SEM.warning("DEFAULT SMSW %s!!", str(dst))
-    e.append(m2_expr.ExprAssign(dst, m2_expr.ExprInt(0x80050033, 32)[:dst.size]))
+    # The value is zero extended on a 64 bit destination
+    e.append(m2_expr.ExprAssign(dst, m2_expr.ExprInt(0x80050033, 64)[:dst.size]))
     return e, []
 
 
@@ -6680,6 +6693,7 @@ def sha256msg2(_, instr, dst, src):
 
 
 mnemo_func.update({
+    "xgetbv": xgetbv,
     "rcpps": rcpps,
     "rcpss": rcpss,
     "rsqrtps": rsqrtps,
@@ -7381,6 +7395,18 @@ mnemo_func.update({
 
 class Lifter_X86_16(Lifter):
 
+    # If True, the direction flag is assumed to be always clear, as required
+    # by the usual ABI at function boundaries: string instructions then
+    # always go forward, without depending on the symbolic value of df
+    assume_df_zero = False
+
+    # If True, the instructions whose effect depends on a condition (shifts
+    # and rotations by a variable count, CMOVcc, string instructions
+    # depending on df, ...) are lifted as a single block, the condition being
+    # expressed with ExprCond in the assigned values, instead of internal IR
+    # blocks. The symbolic execution then never stops on such instructions.
+    flatten_internal_branches = False
+
     def __init__(self, loc_db):
         Lifter.__init__(self, mn_x86, 16, loc_db)
         self.do_stk_segm = False
@@ -7438,6 +7464,13 @@ class Lifter_X86_16(Lifter):
 
         instr_ir, extra_ir = mnemo_func[
             instr.name.lower()](self, instr, *args)
+        if self.assume_df_zero:
+            instr_ir, extra_ir = self._assume_df_zero(instr_ir, extra_ir)
+        if self.flatten_internal_branches or self.assume_df_zero:
+            instr_ir, extra_ir = self._flatten_branches(
+                instr, instr_ir, extra_ir,
+                only_constant=not self.flatten_internal_branches
+            )
         self.mod_pc(instr, instr_ir, extra_ir)
         instr.additional_info.except_on_instr = False
         if instr.additional_info.g1.value & 14 == 0 or \
@@ -7492,6 +7525,109 @@ class Lifter_X86_16(Lifter):
         e_n = [m2_expr.ExprAssign(self.IRDst, m2_expr.ExprCond(c_reg, loc_do_expr,
                                                             loc_skip_expr))]
         return e_n, [cond_bloc, c] + new_extra_ir
+
+    def _assume_df_zero(self, instr_ir, extra_ir):
+        """Replace the reads of df by 0"""
+        fixed = {df: m2_expr.ExprInt(0, 1)}
+
+        def fix(expr):
+            return expr_simp(expr.replace_expr(fixed))
+
+        instr_ir = [m2_expr.ExprAssign(assign.dst, fix(assign.src))
+                    for assign in instr_ir]
+        extra_ir = [irblock.modify_exprs(mod_src=fix) for irblock in extra_ir]
+        return instr_ir, extra_ir
+
+    def _flatten_branches(self, instr, instr_ir, extra_ir, only_constant):
+        """Merge the internal IR blocks of an instruction in a single
+        assignment block.
+        Handled shape: the main block ends with
+            IRDst = cond ? loc_A : loc_B      (or IRDst = loc_A)
+        loc_A / loc_B being either the next instruction, or an internal
+        block made of a single assignment block going to the next
+        instruction.
+        @only_constant: only handle the unconditional case
+        Return the unmodified IR if the shape is not handled"""
+        if not extra_ir:
+            return instr_ir, extra_ir
+        main = {}
+        irdst = None
+        for assign in instr_ir:
+            if assign.dst == self.IRDst:
+                irdst = assign.src
+            else:
+                main[assign.dst] = assign.src
+        if irdst is None:
+            return instr_ir, extra_ir
+        loc_next = self.get_next_loc_key(instr)
+        blocks = dict((irblock.loc_key, irblock) for irblock in extra_ir)
+
+        if irdst.is_cond():
+            if only_constant:
+                return instr_ir, extra_ir
+            cond, targets = irdst.cond, [irdst.src1, irdst.src2]
+        else:
+            cond, targets = None, [irdst]
+
+        # Values written by the main block: an internal block must not read
+        # them (it would need the value after the main block)
+        written = set(dst for dst, src in viewitems(main) if dst != src)
+        has_mem_write = any(dst.is_mem() for dst in written)
+
+        branches = []
+        used = set()
+        for target in targets:
+            if not target.is_loc():
+                return instr_ir, extra_ir
+            if target.loc_key == loc_next:
+                branches.append({})
+                continue
+            irblock = blocks.get(target.loc_key)
+            if irblock is None or len(irblock.assignblks) != 1:
+                return instr_ir, extra_ir
+            assignblk = irblock.assignblks[0]
+            dst_next = assignblk.get(self.IRDst, None)
+            if (dst_next is None or not dst_next.is_loc() or
+                    dst_next.loc_key != loc_next):
+                return instr_ir, extra_ir
+            branch = {}
+            for dst, src in viewitems(assignblk):
+                if dst == self.IRDst:
+                    continue
+                reads = src.get_r(mem_read=True)
+                if dst.is_mem():
+                    reads |= dst.ptr.get_r(mem_read=True)
+                if reads & written:
+                    return instr_ir, extra_ir
+                if has_mem_write and any(expr.is_mem() for expr in reads):
+                    return instr_ir, extra_ir
+                branch[dst] = src
+            branches.append(branch)
+            used.add(target.loc_key)
+        if cond is not None and used != set(blocks):
+            # Unknown internal blocks
+            return instr_ir, extra_ir
+        # (if the destination is constant, the other blocks are unreachable)
+
+        out = []
+        dsts = list(main)
+        for branch in branches:
+            for dst in branch:
+                if dst not in dsts:
+                    dsts.append(dst)
+        for dst in dsts:
+            default = main.get(dst, dst)
+            values = [branch.get(dst, default) for branch in branches]
+            if cond is None or values[0] == values[1]:
+                value = values[0]
+            else:
+                value = m2_expr.ExprCond(cond, values[0], values[1])
+            if value == dst and dst not in main:
+                continue
+            out.append(m2_expr.ExprAssign(dst, value))
+        out.append(m2_expr.ExprAssign(
+            self.IRDst, m2_expr.ExprLoc(loc_next, self.IRDst.size)))
+        return out, []
 
     def expr_fix_regs_for_mode(self, e, mode=64):
         return e.replace_expr(replace_regs[mode])
