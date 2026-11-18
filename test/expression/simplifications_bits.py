@@ -30,6 +30,8 @@ w1 = ExprId("w1", 128)
 w2 = ExprId("w2", 128)
 
 x16 = ExprId("x16", 16)
+m32 = ExprMem(ExprId("p", 64), 32)
+M1 = ExprInt(-1, 32)
 
 ONE = ExprInt(1, 1)
 ZERO = ExprInt(0, 1)
@@ -183,6 +185,35 @@ tests = [
     (((c.signExtend(16).zeroExtend(17) + d.signExtend(16).zeroExtend(17) +
        ExprInt(1, 17)) >> ExprInt(1, 17))[15:16], c | d),
 
+    # Linear mixed boolean-arithmetic
+    ((a | b) - (a & b), a ^ b),
+    ((a ^ b) + (a & b) * ExprInt(2, 32), a + b),
+    ((a | b) + (a & b), a + b),
+    (a + b - (a & b) * ExprInt(2, 32), a ^ b),
+    (a + b - (a | b), a & b),
+    (a + b - (a & b), a | b),
+    ((a | b) - b, a & (b ^ M1)),
+    (a - (a & b), a & (b ^ M1)),
+    ((a ^ M1) + ExprInt(1, 32), -a),
+    ((a ^ M1) + a, M1),
+    ((a | b) * ExprInt(2, 32) - (a ^ b) - a - b, ExprInt(0, 32)),
+    # Opaque constant
+    ((a | (b ^ M1)) + ((a ^ M1) & b) + ExprInt(7, 32), ExprInt(6, 32)),
+    # Only a part of the sum
+    ((a | b) - (a & b) + m32, m32 + (a ^ b)),
+    ((a ^ b) + (a & b) * ExprInt(2, 32) + (b | m32) - (b & m32),
+     a + b + (b ^ m32)),
+    # Words can be any expression
+    (((a * b) | m32) - ((a * b) & m32), (a * b) ^ m32),
+    # Nested
+    (((a | b) - (a & b)) ^ m32, a ^ b ^ m32),
+    ((((a | b) - (a & b)) | m32) + (((a | b) - (a & b)) & m32),
+     (a ^ b) + m32),
+    # Other MBA identities
+    ((a - ExprInt(1, 32)) ^ M1, -a),
+    ((-a) ^ M1, a - ExprInt(1, 32)),
+    ((a & b) * (a | b) + (a & (b ^ M1)) * ((a ^ M1) & b), a * b),
+
     # Masks
     (c.signExtend(8)[7:8], c),
     (c.signExtend(32)[8:16], c.signExtend(8)),
@@ -307,6 +338,33 @@ def random_bit(depth):
                         random_bit(depth - 1))
     return random_bit(depth - 1) ^ ONE
 
+
+# Soundness on random linear MBA
+WORDS = [x, y, ExprId("z", 8)]
+
+
+def random_bitwise(depth):
+    if depth == 0 or random.random() < 0.3:
+        return random.choice(WORDS + [ExprInt(-1, 8)])
+    op = random.choice(["^", "&", "|"])
+    return ExprOp(op, random_bitwise(depth - 1), random_bitwise(depth - 1))
+
+
+for _ in range(400):
+    terms = []
+    for _ in range(random.randrange(2, 6)):
+        term = random_bitwise(2)
+        coeff = random.choice([1, 1, 2, 3, -1, -1, -2, 5])
+        if coeff < 0:
+            term = -term
+        if abs(coeff) != 1:
+            term = term * ExprInt(abs(coeff), 8)
+        terms.append(term)
+    if random.random() < 0.3:
+        terms.append(ExprInt(random.getrandbits(8), 8))
+    expr = ExprOp("+", *terms)
+    after = expr_simp_bits(expr)
+    check_equiv(expr, after)
 
 for _ in range(300):
     count = random.choice([2, 4, 8])

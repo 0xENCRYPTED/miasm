@@ -124,6 +124,18 @@ or `ExpressionSimplifier.PASS_BITS` on your own simplifier.
 * Sign idioms: `x a>> (size - 1)`, `msb(X) ? {X, -1} : {X, 0}`, `-a - 1`,
   `X & ~X`.
 
+* Mixed Boolean-Arithmetic:
+  * linear MBA (sums of bitwise functions of the same words, with integer
+    coefficients): `(a | b) - (a & b)` => `a ^ b`,
+    `(a ^ b) + 2 * (a & b)` => `a + b`, `a + b - (a | b)` => `a & b`,
+    opaque constants, ... The simplification is not a list of patterns: the
+    values of the sum when each word is 0 or -1 characterize it, and the
+    simplest expression with the same values is rebuilt (a single bitwise
+    function, a sum of the words, or a sum of conjunctions). Up to 4 words
+    by sum; sub sums and shared sub expressions are tried as well;
+  * `(a & b) * (a | b) + (a & ~b) * (~a & b)` => `a * b`;
+  * `~(a - 1)` => `-a`, `~(-a)` => `a - 1`, `~a + 1` => `-a`.
+
 On a handler of an obfuscated virtual machine (`PACKUSWB`, `MOVMSKPD`,
 `PSRAD`, `PSHUFLW`, `PAVGW`, `PCMPGTD`, `MOVMSKPS`, `IMUL`, `ADC`), the
 expression of `RAX` goes from 151114 to 105 characters; the result was

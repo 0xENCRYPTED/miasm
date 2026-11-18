@@ -1485,3 +1485,398 @@ def simp_bit_predicate_slice(_, expr):
     if not (arg.is_op() or arg.is_cond() or arg.is_compose()):
         return expr
     return _predicate(expr)
+
+
+# ----------------------------- #
+# Mixed Boolean-Arithmetic      #
+# ----------------------------- #
+#
+# A linear MBA is a sum of bitwise functions of the same words, with integer
+# coefficients: 3 * (a & b) - (a | b) + 2 * a + 7.
+# Two linear MBA are equal for every value of the words if and only if they
+# are equal when each word is either 0 or -1 (the bits do not interact, and
+# the sum is linear). A linear MBA is thus characterized by its values on
+# the 2^k combinations of 0 / -1 of its k words: its signature. The
+# simplification computes the signature, then rebuilds the simplest
+# expression having the same one.
+
+MAX_MBA_WORDS = 4
+
+
+def _mba_atoms(expr, out, stop=frozenset()):
+    """Add to the list @out the words (non bitwise sub expressions) of the
+    bitwise expression @expr
+    @stop: bitwise sub expressions to consider as words"""
+    if expr.is_int() and int(expr) in (0, int(expr.mask)):
+        return
+    if expr.is_op() and expr.op in BITWISE_OPS and expr not in stop:
+        for arg in expr.args:
+            _mba_atoms(arg, out, stop)
+        return
+    if expr not in out:
+        out.append(expr)
+
+
+def _mba_table(expr, atoms, stop=frozenset()):
+    """Truth table (one bit by combination of the @atoms) of the bitwise
+    expression @expr"""
+    rows = 1 << len(atoms)
+    full = (1 << rows) - 1
+    if expr.is_int() and int(expr) in (0, int(expr.mask)):
+        return full if int(expr) else 0
+    if expr.is_op() and expr.op in BITWISE_OPS and expr not in stop:
+        tables = [_mba_table(arg, atoms, stop) for arg in expr.args]
+        out = tables[0]
+        for table in tables[1:]:
+            if expr.op == "^":
+                out ^= table
+            elif expr.op == "&":
+                out &= table
+            else:
+                out |= table
+        return out
+    index = atoms.index(expr)
+    out = 0
+    for row in range(rows):
+        if (row >> index) & 1:
+            out |= 1 << row
+    return out
+
+
+def _and_all(exprs):
+    return exprs[0] if len(exprs) == 1 else ExprOp("&", *exprs)
+
+
+def _bitwise_from_table(table, atoms):
+    """Build a bitwise expression of the words @atoms from its truth
+    @table"""
+    count = len(atoms)
+    size = atoms[0].size
+    ones = ExprInt(-1, size)
+    rows = 1 << count
+    # Words the function depends on
+    support = []
+    for index in range(count):
+        for row in range(rows):
+            if not (row >> index) & 1:
+                if ((table >> row) & 1) != ((table >> (row | (1 << index))) & 1):
+                    support.append(index)
+                    break
+    if not support:
+        return ExprInt(-1 if table & 1 else 0, size)
+    values = []
+    for row in range(1 << len(support)):
+        full = 0
+        for pos, index in enumerate(support):
+            if (row >> pos) & 1:
+                full |= 1 << index
+        values.append((table >> full) & 1)
+    words = [atoms[index] for index in support]
+    last = len(values) - 1
+    if sum(values) == 1:
+        # Conjunction, with negations
+        row = values.index(1)
+        return _and_all([word if (row >> pos) & 1 else word ^ ones
+                         for pos, word in enumerate(words)])
+    if sum(values) == last:
+        # Disjunction, with negations
+        row = values.index(0)
+        lits = [word ^ ones if (row >> pos) & 1 else word
+                for pos, word in enumerate(words)]
+        return lits[0] if len(lits) == 1 else ExprOp("|", *lits)
+    # Algebraic normal form
+    anf = list(values)
+    for pos in range(len(words)):
+        for row in range(len(values)):
+            if (row >> pos) & 1:
+                anf[row] ^= anf[row ^ (1 << pos)]
+    terms = []
+    for row in range(1, len(values)):
+        if anf[row]:
+            terms.append(_and_all([word for pos, word in enumerate(words)
+                                   if (row >> pos) & 1]))
+    if anf[0]:
+        terms.append(ones)
+    return terms[0] if len(terms) == 1 else ExprOp("^", *terms)
+
+
+def _scaled(expr, coeff, size):
+    """@coeff * @expr, with small negative coefficients written as such"""
+    coeff %= 1 << size
+    if coeff == 0:
+        return None
+    if coeff == 1:
+        return expr
+    if coeff == (1 << size) - 1:
+        return -expr
+    if coeff >> (size - 1):
+        return -(expr * ExprInt((1 << size) - coeff, size))
+    return expr * ExprInt(coeff, size)
+
+
+def _mba_candidates(signature, atoms, size):
+    """Yield (list of terms, constant) having the @signature"""
+    mod = 1 << size
+    count = len(atoms)
+    rows = 1 << count
+    constant = signature[0]
+
+    # coeff * (bitwise function): the signature takes two values
+    others = set(signature) - set([constant])
+    if not others:
+        yield [], constant
+        return
+    if len(others) == 1:
+        other = others.pop()
+        table = 0
+        for row in range(rows):
+            if signature[row] == other:
+                table |= 1 << row
+        term = _scaled(_bitwise_from_table(table, atoms),
+                       constant - other, size)
+        yield [term], constant
+
+    # Sum of the words
+    coeffs = [(constant - signature[1 << index]) % mod
+              for index in range(count)]
+    for row in range(rows):
+        expected = constant
+        for index in range(count):
+            if (row >> index) & 1:
+                expected -= coeffs[index]
+        if expected % mod != signature[row]:
+            break
+    else:
+        yield [term for term in (_scaled(atom, coeff, size)
+                                 for atom, coeff in zip(atoms, coeffs))
+               if term is not None], constant
+
+    # Sum of conjunctions (Moebius transform)
+    coeffs = [(constant - value) % mod for value in signature]
+    for index in range(count):
+        for row in range(rows):
+            if (row >> index) & 1:
+                coeffs[row] = (coeffs[row] - coeffs[row ^ (1 << index)]) % mod
+    terms = []
+    for row in range(1, rows):
+        term = _scaled(_and_all([atom for index, atom in enumerate(atoms)
+                                 if (row >> index) & 1]), coeffs[row], size)
+        if term is not None:
+            terms.append(term)
+    yield terms, constant
+
+
+def _mba_term(arg):
+    """Split a term of a sum in (coefficient, bitwise expression)"""
+    coeff = 1
+    while True:
+        if arg.is_op("-") and len(arg.args) == 1:
+            coeff = -coeff
+            arg = arg.args[0]
+        elif (arg.is_op("*") and len(arg.args) == 2 and
+              arg.args[1].is_int()):
+            coeff *= int(arg.args[1])
+            arg = arg.args[0]
+        else:
+            return coeff, arg
+
+
+def simp_linear_mba(_, expr):
+    """Linear Mixed Boolean-Arithmetic expressions
+    (a | b) - (a & b) => a ^ b
+    (a ^ b) + 2 * (a & b) => a + b
+    (a | b) + (a & b) => a + b
+    a + b - (a | b) => a & b
+    (a ^ -1) + 1 => -a
+    2 * (a | b) - (a ^ b) - a - b => 0
+    """
+    if expr.op != "+" or expr.size == 1:
+        return expr
+    size = expr.size
+    mod = 1 << size
+    constant = 0
+    # (coefficient, bitwise expression, words)
+    terms = []
+    for arg in expr.args:
+        if arg.is_int():
+            constant += int(arg)
+            continue
+        coeff, cur = _mba_term(arg)
+        atoms = []
+        _mba_atoms(cur, atoms)
+        terms.append((coeff, cur, atoms, arg))
+    if not any(cur.is_op() and cur.op in BITWISE_OPS
+               for _, cur, _, _ in terms):
+        return expr
+
+    # Group the terms sharing words
+    groups = []
+    for term in terms:
+        merged = [term]
+        words = set(term[2])
+        remaining = []
+        for group_words, group_terms in groups:
+            if words & group_words:
+                words |= group_words
+                merged += group_terms
+            else:
+                remaining.append((group_words, group_terms))
+        groups = remaining + [(words, merged)]
+
+    def build(parts, value):
+        """Sum of the terms @parts and of the constant @value"""
+        parts = list(parts)
+        if value % mod:
+            parts.append(ExprInt(value % mod, size))
+        if not parts:
+            return ExprInt(0, size)
+        if len(parts) == 1:
+            return parts[0]
+        return ExprOp("+", *parts)
+
+    def shared_logic(subset):
+        """Bitwise sub expressions used by several terms of @subset: they
+        can be considered as words"""
+        counts = {}
+        for _, cur, _, _ in subset:
+            seen = set()
+            todo = [cur]
+            while todo:
+                node = todo.pop()
+                if not (node.is_op() and node.op in BITWISE_OPS):
+                    continue
+                if node in seen:
+                    continue
+                seen.add(node)
+                todo.extend(node.args)
+            for node in seen:
+                counts[node] = counts.get(node, 0) + 1
+        return frozenset(node for node, count in counts.items() if count > 1)
+
+    def simplify(subset, value):
+        """Best rewriting of the terms @subset (the constant @value of the
+        sum being taken in account for the cost).
+        Return (gain, new terms, new constant) or None"""
+        best = None
+        stops = [frozenset()]
+        shared = shared_logic(subset)
+        if shared:
+            stops.append(shared)
+        for stop in stops:
+            res = simplify_with(subset, value, stop)
+            if res is not None and (best is None or res[0] > best[0]):
+                best = res
+        return best
+
+    def simplify_with(subset, value, stop):
+        atoms = []
+        for _, cur, _, _ in subset:
+            _mba_atoms(cur, atoms, stop)
+        if (not atoms or len(atoms) > MAX_MBA_WORDS or
+                not any(cur.is_op() and cur.op in BITWISE_OPS
+                        and cur not in stop
+                        for _, cur, _, _ in subset)):
+            return None
+        tables = [(coeff, _mba_table(cur, atoms, stop))
+                  for coeff, cur, _, _ in subset]
+        # Value of the sum when the words are 0 / -1: a bitwise function
+        # is then 0 or -1
+        signature = []
+        for row in range(1 << len(atoms)):
+            total = 0
+            for coeff, table in tables:
+                if (table >> row) & 1:
+                    total -= coeff
+            signature.append(total % mod)
+        cost = _expr_cost(build([arg for _, _, _, arg in subset], value))
+        best = None
+        for new_terms, new_constant in _mba_candidates(signature, atoms,
+                                                       size):
+            gain = cost - _expr_cost(build(new_terms, value + new_constant))
+            if gain > 0 and (best is None or gain > best[0]):
+                best = (gain, new_terms, new_constant)
+        return best
+
+    out = []
+    modified = False
+    for _, group in groups:
+        # The whole group, then its sub sums
+        subsets = [group]
+        if 2 < len(group) <= 6:
+            for pattern in range(1, 1 << len(group)):
+                subset = [term for index, term in enumerate(group)
+                          if (pattern >> index) & 1]
+                if 2 <= len(subset) < len(group):
+                    subsets.append(subset)
+        best = None
+        for subset in subsets:
+            res = simplify(subset, constant)
+            if res is not None and (best is None or res[0] > best[0]):
+                best = res + (subset,)
+        if best is None:
+            out += [arg for _, _, _, arg in group]
+            continue
+        _, new_terms, new_constant, subset = best
+        out += [term[3] for term in group
+                if not any(term is other for other in subset)]
+        out += new_terms
+        constant += new_constant
+        modified = True
+    if not modified:
+        return expr
+    return build(out, constant)
+
+
+def simp_not_arith(_, expr):
+    """Two's complement identities
+    (a + -1) ^ -1 => -a
+    (-a) ^ -1 => a + -1
+    """
+    if expr.op != "^" or len(expr.args) != 2 or expr.size == 1:
+        return expr
+    arg, ones = expr.args
+    if not (ones.is_int() and int(ones) == int(expr.mask)):
+        return expr
+    if arg.is_op("-") and len(arg.args) == 1:
+        return arg.args[0] + ones
+    if arg.is_op("+") and arg.args[-1] == ones:
+        others = arg.args[:-1]
+        if len(others) == 1:
+            return -others[0]
+        return -ExprOp("+", *others)
+    return expr
+
+
+# Truth tables of the bitwise functions of (a, b), a being the bit 0 of the
+# row: a & b, a | b, a & ~b, ~a & b
+_TABLE_AND, _TABLE_OR, _TABLE_A_NOT_B, _TABLE_B_NOT_A = 0b1000, 0b1110, 0b0010, 0b0100
+
+
+def simp_mba_product(_, expr):
+    """Product identity
+    (a & b) * (a | b) + (a & ~b) * (~a & b) => a * b
+    """
+    if expr.op != "+" or len(expr.args) < 2 or expr.size == 1:
+        return expr
+    products = [arg for arg in expr.args
+                if arg.is_op("*") and len(arg.args) == 2 and
+                not arg.args[1].is_int()]
+    for index, prod1 in enumerate(products):
+        for prod2 in products[index + 1:]:
+            atoms = []
+            for factor in prod1.args + prod2.args:
+                _mba_atoms(factor, atoms)
+            if len(atoms) != 2:
+                continue
+            tables1 = set(_mba_table(factor, atoms) for factor in prod1.args)
+            tables2 = set(_mba_table(factor, atoms) for factor in prod2.args)
+            expected = [set([_TABLE_AND, _TABLE_OR]),
+                        set([_TABLE_A_NOT_B, _TABLE_B_NOT_A])]
+            if tables1 in expected and tables2 in expected and tables1 != tables2:
+                others = [arg for arg in expr.args
+                          if arg is not prod1 and arg is not prod2]
+                product = atoms[0] * atoms[1]
+                if not others:
+                    return product
+                return ExprOp("+", product, *others)
+    return expr
