@@ -7,7 +7,7 @@ import random
 
 from miasm.expression.expression import ExprId, ExprInt, ExprOp, ExprCond, \
     ExprCompose, ExprMem, TOK_EQUAL, TOK_INF_UNSIGNED, TOK_INF_SIGNED, \
-    TOK_INF_EQUAL_UNSIGNED
+    TOK_INF_EQUAL_UNSIGNED, TOK_INF_EQUAL_SIGNED
 from miasm.expression.simplifications import expr_simp, expr_simp_bits
 
 try:
@@ -29,8 +29,20 @@ m = ExprMem(ExprId("p", 64), 16)
 w1 = ExprId("w1", 128)
 w2 = ExprId("w2", 128)
 
+x16 = ExprId("x16", 16)
+
 ONE = ExprInt(1, 1)
 ZERO = ExprInt(0, 1)
+
+
+def saturate_u8(word):
+    """PACKUSWB: signed word to unsigned byte, with saturation"""
+    return ExprCond(
+        ExprOp(TOK_INF_EQUAL_SIGNED, word, ExprInt(0, word.size)),
+        ExprInt(0, 8),
+        ExprCond(ExprOp(TOK_INF_SIGNED, word, ExprInt(0xff, word.size)),
+                 word[0:8], ExprInt(0xff, 8))
+    )
 
 
 def bit(expr, index):
@@ -139,6 +151,37 @@ tests = [
     (-a + b + ExprInt(-1, 32), (a ^ ExprInt(-1, 32)) + b),
     # LEA r8, [rcx + 1]; SUB rdx, r8 with rdx = 0
     (-(a + ExprInt(1, 32)), a ^ ExprInt(-1, 32)),
+
+    (bit(a, 0) & (bit(a, 0) ^ ONE), ZERO),
+    (a & b & (a ^ ExprInt(-1, 32)), ExprInt(0, 32)),
+    (a | (a ^ ExprInt(-1, 32)), ExprInt(-1, 32)),
+    (ExprOp(TOK_EQUAL, c, d), c ^ d ^ ONE),
+
+    # Sign
+    (ExprOp("a>>", a, ExprInt(31, 32)), bit(a, 31).signExtend(32)),
+    (ExprOp("a>>", a, ExprInt(32, 32)), bit(a, 31).signExtend(32)),
+    (ExprCond(bit(a, 31), ExprCompose(a, ExprInt(-1, 32)),
+              ExprCompose(a, ExprInt(0, 32))), a.signExtend(64)),
+    (ExprCompose(a, bit(a, 31).signExtend(16)), a.signExtend(48)),
+    (ExprCond(c, a, b)[8:16], ExprCond(c, a[8:16], b[8:16])),
+
+    # Comparison with a constant
+    (saturate_u8(x16)[7:8], ExprOp(TOK_INF_EQUAL_SIGNED, ExprInt(0x80, 16),
+                                   x16)),
+    (ExprOp(TOK_INF_UNSIGNED, x, ExprInt(0x40, 8)) |
+     ExprOp(TOK_EQUAL, x, ExprInt(0x40, 8)),
+     ExprOp(TOK_INF_UNSIGNED, x, ExprInt(0x41, 8))),
+    (bit(x, 7) | (bit(x, 6) & bit(x, 5)),
+     ExprOp(TOK_INF_EQUAL_UNSIGNED, ExprInt(0x3, 3), x[5:8])),
+
+    # Truth table resynthesis
+    ((c & d) | (c & (d ^ ONE)), c),
+    (ExprCond(c, d, d ^ ONE) ^ d, c ^ ONE),
+    ((c.zeroExtend(8) + c.zeroExtend(8))[0:1], ZERO),
+    ((c.zeroExtend(8) + d.zeroExtend(8))[1:2], c & d),
+    # PAVGW of two masks, then sign
+    (((c.signExtend(16).zeroExtend(17) + d.signExtend(16).zeroExtend(17) +
+       ExprInt(1, 17)) >> ExprInt(1, 17))[15:16], c | d),
 
     # Masks
     (c.signExtend(8)[7:8], c),
@@ -270,5 +313,79 @@ for _ in range(300):
     expr = ExprCompose(*[random_bit(3) for _ in range(count)])
     after = expr_simp_bits(expr)
     check_equiv(expr, after)
+
+
+# Real code: handlers of an obfuscated virtual machine, where bit level
+# junk (MOVMSKxx of saturations, averages and comparisons of masks) hides a
+# simple computation
+from miasm.analysis.machine import Machine
+from miasm.arch.x86 import regs
+from miasm.core.locationdb import LocationDB
+from miasm.ir.symbexec import SymbolicExecutionEngine
+
+
+def run_block(lines):
+    loc_db = LocationDB()
+    machine = Machine("x86_64")
+    lifter = machine.lifter(loc_db)
+    symbexec = SymbolicExecutionEngine(lifter)
+    offset = 0
+    for line in lines:
+        instr = machine.mn.fromstring(line, loc_db, 64)
+        instr = machine.mn.dis(machine.mn.asm(instr)[0], 64)
+        instr.offset = offset
+        offset += instr.l
+        ircfg = lifter.new_ircfg()
+        lifter.add_instr_to_ircfg(instr, ircfg)
+        for irblock in ircfg.blocks.values():
+            symbexec.eval_updt_irblock(irblock)
+    return symbexec
+
+
+symbexec = run_block([
+    "PACKUSWB   XMM0, XMM1",
+    "MOVMSKPD   R11, XMM0",
+    "OR         R11, RAX",
+    "AND        R11, RDX",
+    "IMUL       RDX, R11, 0x2BF1270",
+    "PSRAD      XMM0, 0x20",
+    "PSHUFLW    XMM1, XMM0, 0x10",
+    "PAVGW      XMM1, XMM0",
+    "PCMPGTD    XMM1, XMM0",
+    "MOVMSKPS   EAX, XMM1",
+    "MOV        EAX, EAX",
+    "LEA        RSI, QWORD PTR [R8 + RSI]",
+    "ADD        RAX, RDX",
+    "ADC        RAX, RSI",
+])
+XMM0, XMM1 = regs.XMM0, regs.XMM1
+
+
+def is_high(word):
+    return ExprOp(TOK_INF_EQUAL_SIGNED, ExprInt(0x80, 16), word)
+
+
+expected = regs.R8 + regs.RSI + (regs.RDX & (regs.RAX | ExprCompose(
+    is_high(XMM0[112:128]), is_high(XMM1[112:128]), ExprInt(0, 62)
+))) * ExprInt(0x2BF1270, 64)
+result = expr_simp_bits(symbexec.eval_expr(regs.RAX))
+print("VM handler ->", result)
+assert result == expr_simp_bits(expected)
+result = expr_simp_bits(symbexec.eval_expr(XMM0))
+assert result == expr_simp_bits(ExprCompose(*[
+    is_high(word).signExtend(32)
+    for word in (XMM0[48:64], XMM0[112:128], XMM1[48:64], XMM1[112:128])
+]))
+
+symbexec = run_block([
+    "PSUBB      XMM0, XMM0",
+    "PSHUFLW    XMM0, XMM0, 0x40",
+    "PMOVMSKB   EDX, XMM0",
+    "LEA        R8, QWORD PTR [RCX + 0x1]",
+    "MOV        EDX, EDX",
+    "SUB        RDX, R8",
+])
+result = expr_simp_bits(symbexec.eval_expr(regs.RDX))
+assert result == regs.RCX ^ ExprInt(-1, 64)
 
 print("OK")

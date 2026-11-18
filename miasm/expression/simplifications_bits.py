@@ -43,6 +43,10 @@ MAX_VECTOR_SIZE = 256
 MAX_GRAPH_NODES = 20000
 MAX_BDD_NODES = 200000
 MAX_CACHE = 50000
+# Truth table based resynthesis: maximum number of input bits, and of
+# monomials of the resulting algebraic normal form
+MAX_TRUTH_TABLE_INPUTS = 8
+MAX_ANF_TERMS = 4
 
 
 # ----------------------------- #
@@ -72,6 +76,8 @@ def simp_1bit_arith(_, expr):
         return args[0] & (args[1] ^ ExprInt(1, 1))
     if op in ("a>>", "<<<", ">>>") and len(args) == 2:
         return args[0]
+    if op == TOK_EQUAL and len(args) == 2:
+        return args[0] ^ args[1] ^ ExprInt(1, 1)
     return expr
 
 
@@ -92,6 +98,83 @@ def simp_neg_to_not(_, expr):
             if len(args) == 1:
                 return args[0]
             return ExprOp("+", *args)
+    return expr
+
+
+def simp_ashr_sign(_, expr):
+    """x a>> n => signExt(msb(x)) if n >= size - 1"""
+    if expr.op != "a>>" or len(expr.args) != 2 or not expr.args[1].is_int():
+        return expr
+    if int(expr.args[1]) < expr.size - 1:
+        return expr
+    return expr.args[0].msb().signExtend(expr.size)
+
+
+def simp_slice_cond(_, expr):
+    """(c ? a : b)[x:y] => c ? a[x:y] : b[x:y]"""
+    arg = expr.arg
+    if not arg.is_cond():
+        return expr
+    return ExprCond(arg.cond, arg.src1[expr.start:expr.stop],
+                    arg.src2[expr.start:expr.stop])
+
+
+def simp_cond_signext(_, expr):
+    """msb(X) ? {X, -1} : {X, 0} => signExt(X)"""
+    src1, src2 = expr.src1, expr.src2
+    if not (src1.is_compose() and src2.is_compose()):
+        return expr
+    if len(src1.args) != 2 or len(src2.args) != 2:
+        return expr
+    word, ones = src1.args
+    if src2.args[0] != word:
+        return expr
+    zero = src2.args[1]
+    if not (ones.is_int() and zero.is_int() and ones.size == zero.size):
+        return expr
+    if int(zero) != 0 or int(ones) != int(ones.mask):
+        return expr
+    cond = expr.cond
+    if not (cond.is_slice() and cond.size == 1 and cond.arg == word and
+            cond.start == word.size - 1):
+        return expr
+    return word.signExtend(expr.size)
+
+
+def simp_compose_signext(_, expr):
+    """{X, signExt(msb(X))} => signExt(X)
+    {X, msb(X) ? -1 : 0} => signExt(X)"""
+    args = expr.args
+    if len(args) < 2:
+        return expr
+    last, prev = args[-1], args[-2]
+    sign = None
+    control = _mask_control(last)
+    if control is not None and not control[1]:
+        sign = control[0]
+    elif last.size == 1:
+        sign = last
+    if sign is None or sign.size != 1:
+        return expr
+    if not (sign.is_slice() and sign.arg == prev and
+            sign.start == prev.size - 1):
+        return expr
+    extended = prev.signExtend(prev.size + last.size)
+    if len(args) == 2:
+        return extended
+    return ExprCompose(*(list(args[:-2]) + [extended]))
+
+
+def simp_and_not(_, expr):
+    """X & (X ^ -1) => 0, X | (X ^ -1) => -1"""
+    if expr.op not in ("&", "|"):
+        return expr
+    args = set(expr.args)
+    mask = int(expr.mask)
+    for arg in expr.args:
+        if (arg.is_op("^") and len(arg.args) == 2 and arg.args[1].is_int()
+                and int(arg.args[1]) == mask and arg.args[0] in args):
+            return ExprInt(0 if expr.op == "&" else mask, expr.size)
     return expr
 
 
@@ -487,8 +570,19 @@ class _BitGraph(object):
     Leaves are the bits of the expressions which cannot be bit-blasted
     (identifiers, memories, arithmetic operations, ...)"""
 
-    def __init__(self, limit=MAX_GRAPH_NODES):
+    def __init__(self, limit=MAX_GRAPH_NODES, blast_arith=False,
+                 max_leaves=None):
+        """
+        @blast_arith: also bit-blast additions, negations and
+        multiplications by a constant, except the ones on plain words
+        (identifiers, memories, constants and their slices); comparisons of
+        plain words are then kept as leaves (atoms)
+        @max_leaves: maximum number of leaf bits
+        """
         self.limit = limit
+        self.blast_arith = blast_arith
+        self.max_leaves = max_leaves
+        self.leaf_count = 0
         self.nodes = []
         self.index = {}
         self.memo = {}
@@ -508,8 +602,48 @@ class _BitGraph(object):
         return index
 
     def var(self, base, index):
-        self.leaves.setdefault(base, set()).add(index)
+        indexes = self.leaves.setdefault(base, set())
+        if index not in indexes:
+            indexes.add(index)
+            self.leaf_count += 1
+            if (self.max_leaves is not None and
+                    self.leaf_count > self.max_leaves):
+                raise _TooBig()
         return self._new(("V", base, index))
+
+    def _add(self, bits1, bits2, carry):
+        """Ripple carry addition of two vectors of nodes"""
+        out = []
+        for bit1, bit2 in zip(bits1, bits2):
+            partial = self.xor(bit1, bit2)
+            out.append(self.xor(partial, carry))
+            carry = self.or_(self.and_(bit1, bit2),
+                             self.and_(partial, carry))
+        return out
+
+    def _mul_const(self, arg, constant, index):
+        """Node of the bit @index of arg * constant (shift and add)"""
+        count = index + 1
+        bits = [self.bit(arg, pos) for pos in range(count)]
+        acc = [self.zero] * count
+        for shift in range(count):
+            if (constant >> shift) & 1:
+                shifted = [self.zero] * shift + bits[:count - shift]
+                acc = self._add(acc, shifted, self.zero)
+        return acc[index]
+
+    def _arith(self, expr, index):
+        """Node of the bit @index of an addition / negation"""
+        count = index + 1
+        args = expr.args
+        if expr.op == "-":
+            bits = [self.not_(self.bit(args[0], pos)) for pos in range(count)]
+            return self._add(bits, [self.zero] * count, self.one)[index]
+        acc = [self.bit(args[0], pos) for pos in range(count)]
+        for arg in args[1:]:
+            acc = self._add(acc, [self.bit(arg, pos) for pos in range(count)],
+                            self.zero)
+        return acc[index]
 
     def not_(self, a):
         if a == self.zero:
@@ -657,7 +791,26 @@ class _BitGraph(object):
                 return self.bit(args[0], (index + shift) % size)
         if (op in COMPARE_OPS and len(args) == 2 and
                 args[0].size <= MAX_VECTOR_SIZE):
+            if self.blast_arith and all(_is_plain(arg) for arg in args):
+                # Comparison of words: atom
+                return self.var(expr, index)
             return self._compare(expr)
+        if op == "*" and len(args) == 2 and args[1].is_int():
+            constant = int(args[1])
+            if constant and constant & (constant - 1) == 0:
+                # Power of 2: shift
+                shift = constant.bit_length() - 1
+                if shift > index:
+                    return self.zero
+                return self.bit(args[0], index - shift)
+            if self.blast_arith and not _is_plain(args[0]):
+                return self._mul_const(args[0], constant, index)
+        if (self.blast_arith and
+                (op == "+" or (op == "-" and len(args) == 1)) and
+                not all(_is_plain(arg) for arg in args)):
+            # An operation on plain words is kept as a word: it is the
+            # business of the word level passes
+            return self._arith(expr, index)
         return self.var(expr, index)
 
 
@@ -781,6 +934,13 @@ class _BDD(object):
         """Value of @f when every variable is 0"""
         while f > 1:
             f = self.nodes[f][1]
+        return f
+
+    def eval(self, f, values):
+        """Value of @f for the assignment @values ({var: 0 / 1})"""
+        while f > 1:
+            var, low, high = self.nodes[f]
+            f = high if values[var] else low
         return f
 
     def single_path(self, f, target):
@@ -1048,11 +1208,6 @@ def _recognize_predicate(expr):
     if len(words) == 1:
         # Comparison with a constant: a single assignment gives 1 (or 0)
         base, low, high = words[0]
-        if high - low > 6:
-            # Only one assignment over 2^n gives a different result
-            signature = _simulate(graph)[root]
-            if signature not in (0, SIMULATION_MASK):
-                return None
         bdd = _BDD()
         node = bdd.from_graph(graph, order, [root])[root]
         word = _word_expr(base, low, high)
@@ -1068,7 +1223,7 @@ def _recognize_predicate(expr):
             else:
                 res = ExprOp(TOK_EQUAL, word, ExprInt(value, word.size))
             return res if target == 1 else res ^ one
-        return None
+        return _recognize_threshold(graph, root, bdd, node, order, words[0])
 
     word1 = _word_expr(*words[0])
     word2 = _word_expr(*words[1])
@@ -1100,9 +1255,193 @@ def _recognize_predicate(expr):
     return None
 
 
+def _recognize_threshold(graph, root, bdd, node, order, word_info):
+    """Comparison of a word with a constant: word < K or K <= word (signed
+    or unsigned). The constant is found by dichotomy, the candidate is then
+    proven"""
+    base, low, high = word_info
+    length = high - low
+    word = _word_expr(base, low, high)
+
+    def value_at(value):
+        values = dict((order[(base, low + pos)], (value >> pos) & 1)
+                      for pos in range(length))
+        return bdd.eval(node, values)
+
+    last = (1 << length) - 1
+    for signed in (False, True):
+        # Rank in the order -> value
+        flip = (1 << (length - 1)) if signed else 0
+        first = value_at(flip)
+        if first == value_at(last ^ flip):
+            continue
+        rank_low, rank_high = 0, last
+        while rank_high - rank_low > 1:
+            middle = (rank_low + rank_high) // 2
+            if value_at(middle ^ flip) == first:
+                rank_low = middle
+            else:
+                rank_high = middle
+        constant = ExprInt(rank_high ^ flip, length)
+        if first:
+            # True below the constant
+            op = TOK_INF_SIGNED if signed else TOK_INF_UNSIGNED
+            candidate = ExprOp(op, word, constant)
+        else:
+            op = TOK_INF_EQUAL_SIGNED if signed else TOK_INF_EQUAL_UNSIGNED
+            candidate = ExprOp(op, constant, word)
+        candidate_node = graph.bit(candidate, 0)
+        proof = _BDD()
+        nodes = proof.from_graph(graph, order, [root, candidate_node])
+        if nodes[root] == nodes[candidate_node]:
+            return candidate
+    return None
+
+
+def _expr_cost(expr):
+    """Number of distinct operations of @expr"""
+    seen = set()
+    todo = [expr]
+    cost = 0
+    while todo:
+        cur = todo.pop()
+        if cur in seen:
+            continue
+        seen.add(cur)
+        if cur.is_op():
+            cost += max(1, len(cur.args) - 1)
+            todo.extend(cur.args)
+        elif cur.is_cond():
+            cost += 1
+            todo += [cur.cond, cur.src1, cur.src2]
+        elif cur.is_compose():
+            cost += 1
+            todo.extend(cur.args)
+        elif cur.is_slice():
+            todo.append(cur.arg)
+    return cost
+
+
+def _truth_table(graph, root, count):
+    """Truth table (as an integer, one bit by assignment) of the node @root
+    of @graph, the leaves being numbered in their order of creation"""
+    rows = 1 << count
+    mask = (1 << rows) - 1
+    out = {}
+    index = 0
+    for pos, node in enumerate(graph.nodes[:root + 1]):
+        kind = node[0]
+        if kind == "C":
+            res = mask if node[1] else 0
+        elif kind == "V":
+            # Leaf number @index: alternating blocks of 2^index bits
+            block = (1 << (1 << index)) - 1
+            res = 0
+            for start in range(1 << index, rows, 2 << index):
+                res |= block << start
+            index += 1
+        elif kind == "N":
+            res = out[node[1]] ^ mask
+        elif kind == "X":
+            res = out[node[1]] ^ out[node[2]]
+        elif kind == "A":
+            res = out[node[1]] & out[node[2]]
+        else:
+            cond = out[node[1]]
+            res = (cond & out[node[2]]) | ((cond ^ mask) & out[node[3]])
+        out[pos] = res
+    return out[root]
+
+
+def _resynthesize(expr):
+    """If the 1 bit @expr depends on a few input bits only, rebuild it from
+    its truth table: constant, literal, conjunction / disjunction of
+    literals, or XOR of a few conjunctions. Additions are bit-blasted;
+    comparisons of words are inputs. Return None if nothing simpler is
+    found"""
+    graph = _BitGraph(limit=MAX_GRAPH_NODES // 4, blast_arith=True,
+                      max_leaves=MAX_TRUTH_TABLE_INPUTS)
+    root = graph.bit(expr, 0)
+    leaves = [(node[1], node[2]) for node in graph.nodes if node[0] == "V"]
+    count = len(leaves)
+    table = _truth_table(graph, root, count)
+    rows = 1 << count
+
+    # Inputs the function really depends on
+    support = []
+    for index in range(count):
+        for row in range(rows):
+            if not (row >> index) & 1:
+                if ((table >> row) & 1) != ((table >> (row | (1 << index))) & 1):
+                    support.append(index)
+                    break
+    one = ExprInt(1, 1)
+    if not support:
+        return ExprInt(table & 1, 1)
+
+    def literal(index):
+        base, bit = leaves[index]
+        return base if base.size == 1 else base[bit:bit + 1]
+
+    # Truth table restricted to the support
+    size = len(support)
+    values = []
+    for row in range(1 << size):
+        full = 0
+        for pos, index in enumerate(support):
+            if (row >> pos) & 1:
+                full |= 1 << index
+        values.append((table >> full) & 1)
+
+    def cube(row):
+        """Literals (negated if needed) of the assignment @row"""
+        return [literal(index) if (row >> pos) & 1 else literal(index) ^ one
+                for pos, index in enumerate(support)]
+
+    candidate = None
+    if size == 1:
+        candidate = literal(support[0])
+        if values[0]:
+            candidate = candidate ^ one
+    elif sum(values) == 1:
+        # Conjunction
+        candidate = ExprOp("&", *cube(values.index(1)))
+    elif sum(values) == len(values) - 1:
+        # Disjunction: false for a single assignment
+        row = values.index(0) ^ ((1 << size) - 1)
+        candidate = ExprOp("|", *cube(row))
+    else:
+        # Algebraic normal form (Moebius transform)
+        anf = list(values)
+        for pos in range(size):
+            for row in range(1 << size):
+                if (row >> pos) & 1:
+                    anf[row] ^= anf[row ^ (1 << pos)]
+        monomials = [row for row in range(1, 1 << size) if anf[row]]
+        if len(monomials) > MAX_ANF_TERMS:
+            return None
+        terms = []
+        for row in monomials:
+            lits = [literal(index) for pos, index in enumerate(support)
+                    if (row >> pos) & 1]
+            terms.append(lits[0] if len(lits) == 1 else ExprOp("&", *lits))
+        if anf[0]:
+            terms.append(one)
+        candidate = terms[0] if len(terms) == 1 else ExprOp("^", *terms)
+    if _expr_cost(candidate) >= _expr_cost(expr):
+        return None
+    return candidate
+
+
+_cache_resynth = {}
+
+
 def _predicate(expr):
     if expr.size != 1:
         return expr
+    res = _cached(_cache_resynth, _resynthesize, expr)
+    if res is not None and res != expr:
+        return res
     res = _cached(_cache_predicate, _recognize_predicate, expr)
     if res is None or res == expr:
         return expr
@@ -1133,5 +1472,16 @@ def simp_bit_predicate_cond(_, expr):
     if expr.size != 1:
         return expr
     if expr.src1.is_int() and expr.src2.is_int():
+        return expr
+    return _predicate(expr)
+
+
+def simp_bit_predicate_slice(_, expr):
+    """Recognize the predicates computed by a single bit of a word
+    (saturate(w)[7:8] => 0x7F <s w, ...)"""
+    if expr.size != 1:
+        return expr
+    arg = expr.arg
+    if not (arg.is_op() or arg.is_cond() or arg.is_compose()):
         return expr
     return _predicate(expr)

@@ -113,6 +113,21 @@ or `ExpressionSimplifier.PASS_BITS` on your own simplifier.
 * Bit-serial comparisons: `==`, `<u`, `<=u`, `<s`, `<=s` between two words,
   equality of a word with a constant.
 * Shift-and-add multiplication.
+* Comparison of a word with a constant, whatever its form: the sign bit of
+  a `PACKUSWB` saturation becomes `0x80 <=s word`.
+* Truth table resynthesis: a single bit depending on at most 8 input bits
+  (additions, negations and multiplications by a constant being
+  bit-blasted, comparisons of words being inputs) is rebuilt as a constant,
+  a literal, a conjunction / disjunction or a short XOR of conjunctions.
+  This folds the junk made of `MOVMSKxx` applied on averages or comparisons
+  of masks.
+* Sign idioms: `x a>> (size - 1)`, `msb(X) ? {X, -1} : {X, 0}`, `-a - 1`,
+  `X & ~X`.
+
+On a handler of an obfuscated virtual machine (`PACKUSWB`, `MOVMSKPD`,
+`PSRAD`, `PSHUFLW`, `PAVGW`, `PCMPGTD`, `MOVMSKPS`, `IMUL`, `ADC`), the
+expression of `RAX` goes from 151114 to 105 characters; the result was
+checked against the CPU.
 
 Additions and comparisons are recognized semantically: the expression is
 bit-blasted to a BDD and compared with the BDD of word level candidates

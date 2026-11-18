@@ -106,19 +106,25 @@ class ExpressionSimplifier(ExprVisitorCallbackBottomToTop):
         m2_expr.ExprOp: [
             simplifications_bits.simp_1bit_arith,
             simplifications_bits.simp_neg_to_not,
+            simplifications_bits.simp_ashr_sign,
+            simplifications_bits.simp_and_not,
             simplifications_bits.simp_mask_to_cond,
             simplifications_bits.simp_shift_add_mul,
             simplifications_bits.simp_bit_predicate_op,
         ],
         m2_expr.ExprSlice: [
             simplifications_bits.simp_slice_signext_bit,
+            simplifications_bits.simp_slice_cond,
+            simplifications_bits.simp_bit_predicate_slice,
         ],
         m2_expr.ExprCompose: [
+            simplifications_bits.simp_compose_signext,
             simplifications_bits.simp_compose_lift,
             simplifications_bits.simp_compose_arith,
         ],
         m2_expr.ExprCond: [
             simplifications_bits.simp_1bit_cond,
+            simplifications_bits.simp_cond_signext,
             simplifications_bits.simp_bit_predicate_cond,
         ],
     }
