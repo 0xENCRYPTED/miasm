@@ -5948,3 +5948,9 @@ assert(inst.b == instr_bytes)
 for i in range(1, 4):
     mn = mn_x86.dis(b'\x26' + b'\x48' * i + b'\x89\x10', 64)
     assert (str(mn).strip() == 'MOV        QWORD PTR ES:[RAX], RDX')
+
+# REX.R / REX.B are ignored for MMX registers
+mn = mn_x86.dis(decode_hex("450ffcca"), 64)
+assert (str(mn).strip() == 'PADDB      MM1, MM2')
+mn = mn_x86.dis(decode_hex("440fe74b10"), 64)
+assert (str(mn).strip() == 'MOVNTQ     QWORD PTR [RBX + 0x10], MM1')

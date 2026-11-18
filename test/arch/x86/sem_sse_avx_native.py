@@ -251,6 +251,8 @@ def main():
     parser.add_argument("-i", "--iterations", type=int, default=3)
     parser.add_argument("-f", "--filter")
     parser.add_argument("-o", "--output")
+    parser.add_argument("-v", "--verbose", action="store_true",
+                        help="Print each instruction before running it")
     args = parser.parse_args()
 
     features = cpu_features()
@@ -283,6 +285,8 @@ def main():
                 failures.setdefault(name, []).append(
                     "%s: miasm error %s" % (cur_text, str(error)[:200]))
                 continue
+            if args.verbose and iteration == 0:
+                print(cur_text, cur_data.hex(), flush=True)
             ref = run_native(cur_data, state)
             errors = compare(state, got, ref)
             if errors:

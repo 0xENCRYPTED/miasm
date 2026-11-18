@@ -180,7 +180,7 @@ FLOAT64 = re.compile(
 # Pure bit manipulations: NaN and random bits are welcome
 NAN_OK = re.compile(r"^V?(CMP|AND|ANDN|OR|XOR|MOV|UNPCK|SHUF|BLEND|PERM|"
                     r"BROADCAST|INSERT|EXTRACT|TEST|MASKMOV|UCOMI)")
-INT_SOURCE = re.compile(r"^V?(CVTDQ2|CVTSI2|MOVD$|MOVQ$)")
+INT_SOURCE = re.compile(r"^V?(CVTDQ2|CVTSI2|CVTPI2|MOVD$|MOVQ$)")
 
 
 def state_kinds(name):

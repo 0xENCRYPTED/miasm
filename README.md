@@ -70,6 +70,9 @@ Fixes in existing code
 * `CVTSD2SI`, `CVTTSD2SI` and `CVTTSS2SI` decoded their destination register
   with `REX.B` instead of `REX.R`.
 * `CVT(T)SS2SI`, `CVT(T)SD2SI` and `CVTSI2Sx` with 64 bit integer operands.
+* `REX.R` / `REX.B` were applied to MMX registers (`45 0F FC CA` was decoded
+  as `PADDB MM9, MM10` instead of `PADDB MM1, MM2`).
+* `PINSRW` / `PEXTRW` on MMX registers used the XMM element count.
 
 How it was checked
 ------------------
@@ -79,8 +82,10 @@ How it was checked
   vectors.
 * Semantic: each instruction is symbolically executed from a concrete pseudo
   random state, and the result is compared with the execution of the same
-  instruction on a real CPU. `test/arch/x86/sem_sse_avx.py` replays 1110
-  recorded reference states without needing the jitter;
+  instruction on a real CPU. This was run on every MMX / SSE / AVX encoding
+  known by miasm, existing ones included: 4530 forms (register, memory,
+  extended registers, VEX), 535 mnemonics. `test/arch/x86/sem_sse_avx.py`
+  replays 2314 recorded reference states without needing the jitter;
   `test/arch/x86/sem_sse_avx_native.py` regenerates them (Windows x86_64
   host with AVX2).
 

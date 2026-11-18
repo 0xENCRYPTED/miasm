@@ -1996,6 +1996,9 @@ def expr2modrm(expr, parent, w8, sx=0, xmm=0, mm=0, bnd=0):
             if not expr in selreg.expr:
                 return None, None, False
             i = selreg.expr.index(expr)
+            if mm and i > 7:
+                # MM8-MM15 do not exist
+                return None, None, False
             dct_expr[i] = 1
             return [dct_expr], None, True
         else:
@@ -2087,7 +2090,8 @@ def modrm2expr(modrm, parent, w8, sx=0, xmm=0, mm=0, bnd=0):
         if xmm:
             expr = gpregs_xmm.expr[modrm_k]
         elif mm:
-            expr = gpregs_mm.expr[modrm_k]
+            # There are only 8 MMX registers: REX.B is ignored
+            expr = gpregs_mm.expr[modrm_k & 7]
         elif bnd:
             expr = gpregs_bnd.expr[modrm_k]
         elif opmode == 8 and (parent.v_opmode() == 64 or parent.rex_p.value == 1):
@@ -2756,8 +2760,11 @@ class x86_rm_reg_noarg(object):
 
 class x86_rm_reg_mm(x86_rm_reg_noarg, x86_arg):
     selreg = gpregs_mm
+    # There are only 8 MMX registers: REX.R is ignored
+    rex_extended = False
+
     def decode(self, v):
-        if self.parent.mode == 64 and self.getrexsize():
+        if self.rex_extended and self.parent.mode == 64 and self.getrexsize():
             v |= 0x8
         self.expr = self.selreg.expr[v]
         return True
@@ -2768,7 +2775,9 @@ class x86_rm_reg_mm(x86_rm_reg_noarg, x86_arg):
         if self.expr not in self.selreg.expr:
             return False
         i = self.selreg.expr.index(self.expr)
-        if self.parent.mode == 64 and i > 7:
+        if i > 7:
+            if not self.rex_extended or self.parent.mode != 64:
+                return False
             i -= 8
             self.setrexsize(1)
         self.value = i
@@ -2776,9 +2785,11 @@ class x86_rm_reg_mm(x86_rm_reg_noarg, x86_arg):
 
 class x86_rm_reg_xmm(x86_rm_reg_mm):
     selreg = gpregs_xmm
+    rex_extended = True
 
 class x86_rm_reg_bnd(x86_rm_reg_mm):
     selreg = gpregs_bnd
+    rex_extended = True
 
 class x86_rm_reg(x86_rm_reg_noarg, x86_arg):
     pass
@@ -5114,6 +5125,7 @@ class x86_rm_ymm_reg(x86_rm_ymm):
 
 class x86_rm_reg_ymm(x86_rm_reg_mm):
     selreg = gpregs_ymm
+    rex_extended = True
 
 
 class x86_vex_v_xmm(x86_rm_reg_noarg, x86_arg):

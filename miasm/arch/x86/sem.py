@@ -4690,10 +4690,8 @@ def punpcklqdq(ir, instr, dst, src):
 def pinsr(_, instr, dst, src, imm, size):
     e = []
 
-    mask = {8: 0xF,
-            16: 0x7,
-            32: 0x3,
-            64: 0x1}[size]
+    # The number of elements depends on the vector kind (MMX / XMM)
+    mask = dst.size // size - 1
 
     sel = (int(imm) & mask) * size
     e.append(m2_expr.ExprAssign(dst[sel:sel + size], src[:size]))
@@ -4720,10 +4718,8 @@ def pinsrq(ir, instr, dst, src, imm):
 def pextr(_, instr, dst, src, imm, size):
     e = []
 
-    mask = {8: 0xF,
-            16: 0x7,
-            32: 0x3,
-            64: 0x1}[size]
+    # The number of elements depends on the vector kind (MMX / XMM)
+    mask = src.size // size - 1
 
     sel = (int(imm) & mask) * size
     e.append(m2_expr.ExprAssign(dst, src[sel:sel + size].zeroExtend(dst.size)))
