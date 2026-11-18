@@ -257,3 +257,23 @@ for name in ["RCX", "RDX", "R8", "R9", "R10", "R11"]:
 for name in ["RBX", "RSI", "RDI", "R12"]:
     assert getattr(regs, name) not in effects
 print("Win64 call model: OK")
+
+###############################################################################
+# A flattened instruction in the middle of a block
+###############################################################################
+loc_db = LocationDB()
+code = b""
+for line in ["SHL RAX, CL", "MOVSB", "CMOVZ RAX, RBX", "ADD RAX, RBX", "RET"]:
+    code += machine.mn.asm(machine.mn.fromstring(line, loc_db, 64))[0]
+mdis = machine.dis_engine(bin_stream_str(code, base_address=0x1000),
+                          loc_db=loc_db)
+block = mdis.dis_block(0x1000)
+assert len(block.lines) == 5
+lifter = machine.lifter(loc_db)
+lifter.flatten_internal_branches = True
+lifter.assume_df_zero = True
+ircfg = lifter.new_ircfg()
+lifter.add_asmblock_to_ircfg(block, ircfg)
+# A single IR block for the whole instruction block
+assert len(ircfg.blocks) == 1
+print("flattened block: OK")

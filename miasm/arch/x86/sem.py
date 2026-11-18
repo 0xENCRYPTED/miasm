@@ -7625,8 +7625,8 @@ class Lifter_X86_16(Lifter):
             if value == dst and dst not in main:
                 continue
             out.append(m2_expr.ExprAssign(dst, value))
-        out.append(m2_expr.ExprAssign(
-            self.IRDst, m2_expr.ExprLoc(loc_next, self.IRDst.size)))
+        # No IRDst: as any instruction without flow change, the execution
+        # goes on with the next one in the same IR block
         return out, []
 
     def expr_fix_regs_for_mode(self, e, mode=64):

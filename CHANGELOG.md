@@ -9,6 +9,10 @@
 - `aes_sbox` / `aes_inv_sbox` operators (simplification and z3 translation)
 - Mixed Boolean-Arithmetic simplifications in the default `expr_simp`
 - `miasm.expression.proof`: sample then prove (constants, equivalences)
+- `miasm.analysis.pathwalk`: symbolic path walker recovering the control
+  flow graph of obfuscated code (opaque predicates, computed targets)
+- jitter: SSE / AVX with the python and llvm engines (`YMMx_H` registers,
+  float operators, AES, `XGETBV`)
 - `SymbolicExecutionEngineImage`: symbolic execution reading the image
 - x86 lifter options `flatten_internal_branches` and `assume_df_zero`
 - x86: `XGETBV` semantic, `LifterModelCall_x86_64_Win64`

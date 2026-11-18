@@ -26,8 +26,8 @@ About this fork: x86 SSE / AVX support
 
 This fork of [cea-sec/miasm](https://github.com/cea-sec/miasm) completes the
 x86 SSE support and adds AVX / AVX2 (branch `sse-support`). Everything below
-covers the disassembler, the assembler and the IR semantic; the jitter is not
-concerned.
+covers the disassembler, the assembler, the IR semantic and the jitter
+(`python` and `llvm` engines).
 
 What was added
 --------------
@@ -180,6 +180,30 @@ Symbolic execution helpers
   proof), `REFUTED` or `UNKNOWN`. `prove_equal(expr1, expr2)` does the same
   for an equivalence. This is the fallback for the obfuscated values out of
   reach of the simplifications (non linear MBA, comparisons inside sums).
+* **Path walker.** `miasm.analysis.pathwalk.PathWalker` executes the code
+  block by block and rebuilds its control flow graph:
+
+  ```python
+  walker = PathWalker(machine, cont.bin_stream, loc_db,
+                      read_only=[(text_start, rdata_end)])
+  result = walker.run(entry)
+  print(result.summary())
+  open("cfg.dot", "w").write(result.dot())
+  ```
+
+  - a condition proven constant is an opaque predicate: only one side is
+    walked; else the state is forked and the condition is recorded;
+  - a computed destination (MBA, jump table read in the image) is
+    simplified, then proven constant; else it is reported as unresolved;
+  - calls are skipped or followed (`follow_calls`, a function can decide);
+  - an "already seen" key made of the address, the call context and the
+    concrete registers stops the walk: a loop driven by concrete values (VM
+    dispatcher) is unrolled, a loop driven by symbolic values is walked
+    once; `max_steps` / `max_visits` bound the walk.
+
+  The result gives the blocks, the edges with their kind, the opaque
+  predicates, the computed targets, the unresolved destinations, the calls
+  and the end of each path with its constraints.
 * **Win64 calls.** `LifterModelCall_x86_64_Win64`: arguments in `RCX`,
   `RDX`, `R8`, `R9`, result in `RAX`, stack pointer preserved, volatile
   registers clobbered.
@@ -198,8 +222,9 @@ Known limits
   suppression on masked elements is not modeled.
 * Float operators have no z3 translation (as before); every new integer
   instruction translates.
-* The jitter does not know the `YMMx_H` registers: AVX code cannot be
-  jitted.
+* Jitter: SSE and AVX work with the `python` and `llvm` engines (the
+  reference states recorded on a CPU are replayed through both). The `gcc`
+  engine lacks the AES and rounding operators in its C translator.
 
 Table of Contents
 =================

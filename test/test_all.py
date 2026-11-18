@@ -396,6 +396,8 @@ testset += RegressionTest(["depgraph.py"], base_dir="analysis",
                                                      (15, 1))
                            ])
 testset += RegressionTest(["modularintervals.py"], base_dir="analysis")
+testset += RegressionTest(["pathwalk.py"], base_dir="analysis",
+                          tags=[TAGS["z3"]])
 for jitter in ArchUnitTest.jitter_engines:
     if jitter in blacklist.get(script, []):
         continue
