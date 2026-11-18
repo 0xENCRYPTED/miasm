@@ -8,6 +8,7 @@ if importlib.util.find_spec("z3") is None:
     raise ImportError("No module named 'z3'")
 
 from miasm.ir.translators.translator import Translator
+from miasm.expression.expression_helper import AES_SBOX, AES_INV_SBOX
 
 log = logging.getLogger("translator_z3")
 console_handler = logging.StreamHandler()
@@ -250,6 +251,16 @@ class TranslatorZ3(Translator):
                 res = res ^ z3.Extract(i, i, arg)
         elif expr.op == '-':
             res = -res
+        elif expr.op in ("aes_sbox", "aes_inv_sbox"):
+            # Table lookup, as a balanced tree of If
+            table = AES_SBOX if expr.op == "aes_sbox" else AES_INV_SBOX
+            src = res
+            nodes = [z3.BitVecVal(value, 8) for value in table]
+            for bit in range(8):
+                selector = z3.Extract(bit, bit, src) == 1
+                nodes = [z3.If(selector, nodes[i + 1], nodes[i])
+                         for i in range(0, len(nodes), 2)]
+            res = nodes[0]
         elif expr.op == "cnttrailzeros":
             size = expr.size
             src = res

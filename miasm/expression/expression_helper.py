@@ -38,6 +38,38 @@ def parity(a):
     return cpt
 
 
+def _gen_aes_sbox():
+    """Compute the AES S-Box and its inverse (operators 'aes_sbox' and
+    'aes_inv_sbox')"""
+    def rol8(value, count):
+        return ((value << count) | (value >> (8 - count))) & 0xFF
+
+    sbox = [0] * 256
+    p = q = 1
+    while True:
+        # p = p * 3 in GF(2^8)
+        p = p ^ ((p << 1) & 0xFF) ^ (0x1B if p & 0x80 else 0)
+        # q = q / 3 in GF(2^8)
+        q ^= q << 1
+        q ^= q << 2
+        q ^= q << 4
+        q &= 0xFF
+        if q & 0x80:
+            q ^= 0x09
+        # q is the multiplicative inverse of p: apply the affine transform
+        sbox[p] = q ^ rol8(q, 1) ^ rol8(q, 2) ^ rol8(q, 3) ^ rol8(q, 4) ^ 0x63
+        if p == 1:
+            break
+    sbox[0] = 0x63
+    inv_sbox = [0] * 256
+    for index, value in enumerate(sbox):
+        inv_sbox[value] = index
+    return tuple(sbox), tuple(inv_sbox)
+
+
+AES_SBOX, AES_INV_SBOX = _gen_aes_sbox()
+
+
 def merge_sliceto_slice(expr):
     """
     Apply basic factorisation on ExprCompose sub components

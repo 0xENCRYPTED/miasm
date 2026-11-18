@@ -1,5 +1,5 @@
 from builtins import range
-from miasm.expression.expression import ExprId
+from miasm.expression.expression import ExprId, ExprCompose
 from miasm.core.cpu import reg_info
 
 
@@ -38,6 +38,15 @@ regs64_expr = [ExprId(x, 64) for x in regs64_str]
 regs_xmm_str = ["XMM%d" % i for i in range(16)]
 regs_xmm_expr = [ExprId(x, 128) for x in regs_xmm_str]
 
+# AVX: YMMx is only used as an instruction operand. The architectural state
+# is split in XMMx (low 128 bits) and YMMx_H (high 128 bits), so that legacy
+# SSE code (which leaves the upper half untouched) keeps working unmodified.
+regs_ymm_str = ["YMM%d" % i for i in range(16)]
+regs_ymm_expr = [ExprId(x, 256) for x in regs_ymm_str]
+
+regs_ymmh_str = ["YMM%d_H" % i for i in range(16)]
+regs_ymmh_expr = [ExprId(x, 128) for x in regs_ymmh_str]
+
 regs_mm_str = ["MM%d" % i for i in range(16)]
 regs_mm_expr = [ExprId(x, 64) for x in regs_mm_str]
 
@@ -51,6 +60,7 @@ gpregs32 = reg_info(regs32_str, regs32_expr)
 gpregs64 = reg_info(regs64_str, regs64_expr)
 
 gpregs_xmm = reg_info(regs_xmm_str, regs_xmm_expr)
+gpregs_ymm = reg_info(regs_ymm_str, regs_ymm_expr)
 gpregs_mm = reg_info(regs_mm_str, regs_mm_expr)
 gpregs_bnd = reg_info(regs_bnd_str, regs_bnd_expr)
 
@@ -294,6 +304,17 @@ XMM13 = regs_xmm_expr[13]
 XMM14 = regs_xmm_expr[14]
 XMM15 = regs_xmm_expr[15]
 
+for _i in range(16):
+    globals()["YMM%d" % _i] = regs_ymm_expr[_i]
+    globals()["YMM%d_H" % _i] = regs_ymmh_expr[_i]
+del _i
+
+# YMMx operand -> architectural state
+ymm_to_state = dict(
+    (ymm, ExprCompose(xmm, ymmh))
+    for ymm, xmm, ymmh in zip(regs_ymm_expr, regs_xmm_expr, regs_ymmh_expr)
+)
+
 # tmp1= ExprId(reg_tmp1)
 zf = ExprId(reg_zf, size=1)
 nf = ExprId(reg_nf, size=1)
@@ -401,7 +422,7 @@ all_regs_ids = [
 
 
     exception_flags, interrupt_num,
-] + fltregs32_expr
+] + fltregs32_expr + regs_ymm_expr + regs_ymmh_expr
 
 all_regs_ids_no_alias = [
     RAX, RBX, RCX, RDX, RSP, RBP, RIP, RSI, RDI,
@@ -423,7 +444,7 @@ all_regs_ids_no_alias = [
 
 
     exception_flags, interrupt_num,
-] + fltregs32_expr
+] + fltregs32_expr + regs_ymmh_expr
 
 attrib_to_regs = {
     16: regs16_expr + all_regs_ids_no_alias[all_regs_ids_no_alias.index(zf):] + [IP],

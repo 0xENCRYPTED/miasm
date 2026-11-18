@@ -8,6 +8,7 @@ from miasm.core.modint import mod_size2int, mod_size2uint
 from miasm.expression.expression import ExprInt, ExprSlice, ExprMem, \
     ExprCond, ExprOp, ExprCompose, TOK_INF_SIGNED, TOK_INF_UNSIGNED, \
     TOK_INF_EQUAL_SIGNED, TOK_INF_EQUAL_UNSIGNED, TOK_EQUAL
+from miasm.expression.expression_helper import AES_SBOX, AES_INV_SBOX
 from miasm.expression.expression_helper import parity, op_propag_cst, \
     merge_sliceto_slice
 from miasm.expression.simplifications_explicit import simp_flags
@@ -307,6 +308,12 @@ def simp_cst_propagation(e_s, expr):
     # parity(int) => int
     if op_name == 'parity' and args[0].is_int():
         return ExprInt(parity(int(args[0])), 1)
+
+    # aes_sbox(int) => int
+    if op_name == 'aes_sbox' and args[0].is_int():
+        return ExprInt(AES_SBOX[int(args[0]) & 0xFF], args[0].size)
+    if op_name == 'aes_inv_sbox' and args[0].is_int():
+        return ExprInt(AES_INV_SBOX[int(args[0]) & 0xFF], args[0].size)
 
     # (-a) * b * (-c) * (-d) => (-a) * b * c * d
     if op_name == "*" and len(args) > 1:

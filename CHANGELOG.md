@@ -1,6 +1,12 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+- x86: missing SSE, SSE2, SSE3, SSSE3, SSE4.1 and SSE4.2 instructions
+  (disassembler, assembler and semantic), AES-NI and SHA semantic
+- x86: VEX prefix, YMM registers, AVX and AVX2 instructions (disassembler,
+  assembler and semantic)
+- `aes_sbox` / `aes_inv_sbox` operators (simplification and z3 translation)
 
 ## 0.1.5 - 2023-04-18
 ### Fixed

@@ -4253,7 +4253,16 @@ def cvtps2pi(_, instr, dst, src):
     return e, []
 
 
+def _cvt_fp_to_int64(dst, src, truncate):
+    """REX.W / VEX.W form of CVT(T)SS2SI / CVT(T)SD2SI: 64 bit destination"""
+    if truncate:
+        src = m2_expr.ExprOp('fpround_towardszero', src)
+    return [m2_expr.ExprAssign(dst, m2_expr.ExprOp('fp_to_sint64', src))], []
+
+
 def cvtsd2si(_, instr, dst, src):
+    if dst.size == 64:
+        return _cvt_fp_to_int64(dst, src[:64], False)
     e = []
     e.append(
         m2_expr.ExprAssign(dst[:32], m2_expr.ExprOp('fp_to_sint32', src[:64])))
@@ -4269,12 +4278,17 @@ def cvtsd2ss(_, instr, dst, src):
 
 def cvtsi2sd(_, instr, dst, src):
     e = []
+    if src.size == 64:
+        # REX.W / VEX.W form: 64 bit integer source
+        value = src
+    else:
+        value = src[:32].signExtend(64)
     e.append(
         m2_expr.ExprAssign(
             dst[:64],
             m2_expr.ExprOp(
                 'sint_to_fp',
-                src[:32].signExtend(64)
+                value
             )
         )
     )
@@ -4283,8 +4297,13 @@ def cvtsi2sd(_, instr, dst, src):
 
 def cvtsi2ss(_, instr, dst, src):
     e = []
-    e.append(
-        m2_expr.ExprAssign(dst[:32], m2_expr.ExprOp('sint_to_fp', src[:32])))
+    if src.size == 64:
+        # REX.W / VEX.W form: 64 bit integer source
+        value = m2_expr.ExprOp('fpconvert_fp32',
+                               m2_expr.ExprOp('sint_to_fp', src))
+    else:
+        value = m2_expr.ExprOp('sint_to_fp', src[:32])
+    e.append(m2_expr.ExprAssign(dst[:32], value))
     return e, []
 
 
@@ -4296,6 +4315,8 @@ def cvtss2sd(_, instr, dst, src):
 
 
 def cvtss2si(_, instr, dst, src):
+    if dst.size == 64:
+        return _cvt_fp_to_int64(dst, src[:32], False)
     e = []
     e.append(
         m2_expr.ExprAssign(dst[:32], m2_expr.ExprOp('fp_to_sint32', src[:32])))
@@ -4329,6 +4350,8 @@ def cvttpd2dq(_, instr, dst, src):
     return e, []
 
 def cvttsd2si(_, instr, dst, src):
+    if dst.size == 64:
+        return _cvt_fp_to_int64(dst, src[:64], True)
     return _cvtt_tpl(dst, src, [0], double=True), []
 
 def cvttps2dq(_, instr, dst, src):
@@ -4338,6 +4361,8 @@ def cvttps2pi(_, instr, dst, src):
     return _cvtt_tpl(dst, src, [0, 1], double=False), []
 
 def cvttss2si(_, instr, dst, src):
+    if dst.size == 64:
+        return _cvt_fp_to_int64(dst, src[:32], True)
     return _cvtt_tpl(dst, src, [0], double=False), []
 
 def blendps(_, instr, dst, src, imm8):
@@ -5960,6 +5985,1407 @@ mnemo_func = {'mov': mov,
               "fxsave": fxsave,
               "fxrstor": fxrstor,
               }
+
+
+###############################################################################
+# SSE / SSE2 / SSE3 / SSSE3 / SSE4.1 / SSE4.2 / AES / SHA additions
+###############################################################################
+
+def _elts(expr, size):
+    """Split @expr in elements of @size bits, lowest first"""
+    return [expr[i:i + size] for i in range(0, expr.size, size)]
+
+
+def _xor_all(terms):
+    return terms[0] if len(terms) == 1 else m2_expr.ExprOp('^', *terms)
+
+
+def _or_all(terms):
+    return terms[0] if len(terms) == 1 else m2_expr.ExprOp('|', *terms)
+
+
+def _and_all(terms):
+    return terms[0] if len(terms) == 1 else m2_expr.ExprOp('&', *terms)
+
+
+def sse_nop(_, instr, *args):
+    """Instruction without any effect on the modeled state (cache hints)"""
+    return [], []
+
+
+def sse_mov(_, instr, dst, src):
+    """Plain move (non temporal hints and alignment checks are ignored)"""
+    return [m2_expr.ExprAssign(dst, src)], []
+
+
+# 1.0, encoded in IEEE754
+_FP_ONE = {32: 0x3f800000, 64: 0x3ff0000000000000}
+
+
+def _fp_rcp(expr):
+    # The hardware only gives an approximation (relative error < 1.5 * 2^-12)
+    # of the reciprocal; it is modeled here by the exact value
+    one = m2_expr.ExprInt(_FP_ONE[expr.size], expr.size)
+    return m2_expr.ExprOp('fdiv', one, expr)
+
+
+def _fp_rsqrt(expr):
+    # Same remark as for _fp_rcp
+    one = m2_expr.ExprInt(_FP_ONE[expr.size], expr.size)
+    return m2_expr.ExprOp('fdiv', one, m2_expr.ExprOp('fsqrt', expr))
+
+
+def _vec_unary(func, size, scalar=False):
+    """Apply @func on each @size bits element of the source (only on the
+    lowest one if @scalar)"""
+    def vec_unary_instr(_, instr, dst, src):
+        if scalar:
+            return [m2_expr.ExprAssign(dst[:size], func(src[:size]))], []
+        out = [func(elt) for elt in _elts(src, size)]
+        return [m2_expr.ExprAssign(dst, m2_expr.ExprCompose(*out))], []
+    return vec_unary_instr
+
+
+rcpps = _vec_unary(_fp_rcp, 32)
+rcpss = _vec_unary(_fp_rcp, 32, scalar=True)
+rsqrtps = _vec_unary(_fp_rsqrt, 32)
+rsqrtss = _vec_unary(_fp_rsqrt, 32, scalar=True)
+
+pabsb = _vec_unary(_absolute, 8)
+pabsw = _vec_unary(_absolute, 16)
+pabsd = _vec_unary(_absolute, 32)
+
+
+def pshufw(_, instr, dst, src, imm):
+    control = int(imm)
+    out = []
+    for i in range(4):
+        shift = ((control >> (i * 2)) & 3) * 16
+        out.append(src[shift: shift + 16])
+    return [m2_expr.ExprAssign(dst, m2_expr.ExprCompose(*out))], []
+
+
+def movddup(_, instr, dst, src):
+    out = []
+    for i in range(0, dst.size, 128):
+        # A 64 bit memory source is only possible for the 128 bit form
+        low = src[i:i + 64]
+        out += [low, low]
+    return [m2_expr.ExprAssign(dst, m2_expr.ExprCompose(*out))], []
+
+
+def movsldup(_, instr, dst, src):
+    elts = _elts(src, 32)
+    out = [elts[i & ~1] for i in range(len(elts))]
+    return [m2_expr.ExprAssign(dst, m2_expr.ExprCompose(*out))], []
+
+
+def movshdup(_, instr, dst, src):
+    elts = _elts(src, 32)
+    out = [elts[i | 1] for i in range(len(elts))]
+    return [m2_expr.ExprAssign(dst, m2_expr.ExprCompose(*out))], []
+
+
+def _addsub(size):
+    def addsub_instr(_, instr, dst, src):
+        out = []
+        for i, (elt1, elt2) in enumerate(zip(_elts(dst, size),
+                                             _elts(src, size))):
+            out.append(m2_expr.ExprOp('fadd' if i & 1 else 'fsub', elt1, elt2))
+        return [m2_expr.ExprAssign(dst, m2_expr.ExprCompose(*out))], []
+    return addsub_instr
+
+
+addsubps = _addsub(32)
+addsubpd = _addsub(64)
+
+
+def _horizontal(op, size):
+    """Horizontal operation: @op is applied on adjacent pairs of elements,
+    first from the destination, then from the source.
+    @op: (elt1, elt2) -> result"""
+    def horizontal_instr(_, instr, dst, src):
+        out = []
+        for operand in (dst, src):
+            elts = _elts(operand, size)
+            for i in range(0, len(elts), 2):
+                out.append(op(elts[i], elts[i + 1]))
+        return [m2_expr.ExprAssign(dst, m2_expr.ExprCompose(*out))], []
+    return horizontal_instr
+
+
+def _sat_add16(elt1, elt2):
+    return _signed_to_signed_saturation(
+        elt1.signExtend(32) + elt2.signExtend(32), 16)
+
+
+def _sat_sub16(elt1, elt2):
+    return _signed_to_signed_saturation(
+        elt1.signExtend(32) - elt2.signExtend(32), 16)
+
+
+haddps = _horizontal(lambda x, y: m2_expr.ExprOp('fadd', x, y), 32)
+haddpd = _horizontal(lambda x, y: m2_expr.ExprOp('fadd', x, y), 64)
+hsubps = _horizontal(lambda x, y: m2_expr.ExprOp('fsub', x, y), 32)
+hsubpd = _horizontal(lambda x, y: m2_expr.ExprOp('fsub', x, y), 64)
+phaddw = _horizontal(lambda x, y: x + y, 16)
+phaddd = _horizontal(lambda x, y: x + y, 32)
+phaddsw = _horizontal(_sat_add16, 16)
+phsubw = _horizontal(lambda x, y: x - y, 16)
+phsubd = _horizontal(lambda x, y: x - y, 32)
+phsubsw = _horizontal(_sat_sub16, 16)
+
+
+def pmaddubsw(_, instr, dst, src):
+    out = []
+    for i in range(0, dst.size, 16):
+        # Unsigned bytes from the destination, signed ones from the source
+        mul1 = dst[i:i + 8].zeroExtend(32) * src[i:i + 8].signExtend(32)
+        mul2 = (dst[i + 8:i + 16].zeroExtend(32) *
+                src[i + 8:i + 16].signExtend(32))
+        out.append(_signed_to_signed_saturation(mul1 + mul2, 16))
+    return [m2_expr.ExprAssign(dst, m2_expr.ExprCompose(*out))], []
+
+
+def pmulhrsw(_, instr, dst, src):
+    out = []
+    for elt1, elt2 in zip(_elts(dst, 16), _elts(src, 16)):
+        product = elt1.signExtend(32) * elt2.signExtend(32)
+        rounded = ((product >> m2_expr.ExprInt(14, 32)) +
+                   m2_expr.ExprInt(1, 32))
+        out.append(rounded[1:17])
+    return [m2_expr.ExprAssign(dst, m2_expr.ExprCompose(*out))], []
+
+
+def _blend_imm(size):
+    """Blend controlled by an immediate, one bit per @size bits element"""
+    def blend_instr(_, instr, dst, src, imm8):
+        control = int(imm8)
+        out = []
+        for i, (elt1, elt2) in enumerate(zip(_elts(dst, size),
+                                             _elts(src, size))):
+            out.append(elt2 if (control >> i) & 1 else elt1)
+        return [m2_expr.ExprAssign(dst, m2_expr.ExprCompose(*out))], []
+    return blend_instr
+
+
+blendpd = _blend_imm(64)
+
+
+def _blendv(size):
+    """Blend controlled by the sign bit of each @size bits element of a mask
+    (implicit XMM0 for the legacy encoding)"""
+    def blendv_instr(_, instr, dst, src, mask=None):
+        if mask is None:
+            mask = regs_xmm_expr[0]
+        out = []
+        for elt1, elt2, sel in zip(_elts(dst, size), _elts(src, size),
+                                   _elts(mask, size)):
+            out.append(m2_expr.ExprCond(sel.msb(), elt2, elt1))
+        return [m2_expr.ExprAssign(dst, m2_expr.ExprCompose(*out))], []
+    return blendv_instr
+
+
+blendvps = _blendv(32)
+blendvpd = _blendv(64)
+pblendvb = _blendv(8)
+
+
+def _dot_product(size):
+    def dp_instr(_, instr, dst, src, imm8):
+        control = int(imm8)
+        elts1, elts2 = _elts(dst, size), _elts(src, size)
+        count = len(elts1)
+        zero = m2_expr.ExprInt(0, size)
+        products = []
+        for i in range(count):
+            if (control >> (4 + i)) & 1:
+                products.append(m2_expr.ExprOp('fmul', elts1[i], elts2[i]))
+            else:
+                products.append(zero)
+        # Pairwise sums, as done by the hardware
+        while len(products) > 1:
+            products = [m2_expr.ExprOp('fadd', products[i], products[i + 1])
+                        for i in range(0, len(products), 2)]
+        total = products[0]
+        out = [total if (control >> i) & 1 else zero for i in range(count)]
+        return [m2_expr.ExprAssign(dst, m2_expr.ExprCompose(*out))], []
+    return dp_instr
+
+
+dpps = _dot_product(32)
+dppd = _dot_product(64)
+
+
+def extractps(_, instr, dst, src, imm):
+    sel = (int(imm) & 3) * 32
+    return [m2_expr.ExprAssign(dst, src[sel:sel + 32].zeroExtend(dst.size))], []
+
+
+def insertps(_, instr, dst, src, imm):
+    control = int(imm)
+    if src.size == 32:
+        # Memory source
+        elt = src
+    else:
+        count_s = (control >> 6) & 3
+        elt = src[count_s * 32:count_s * 32 + 32]
+    count_d = (control >> 4) & 3
+    zmask = control & 0xf
+    out = _elts(dst, 32)
+    out[count_d] = elt
+    out = [m2_expr.ExprInt(0, 32) if (zmask >> i) & 1 else out[i]
+           for i in range(4)]
+    return [m2_expr.ExprAssign(dst, m2_expr.ExprCompose(*out))], []
+
+
+def _pmovx(in_size, out_size, signed):
+    """Sign / zero extend the lowest @in_size bits elements of the source"""
+    def pmovx_instr(_, instr, dst, src):
+        out = []
+        for i in range(dst.size // out_size):
+            elt = src[i * in_size:(i + 1) * in_size]
+            if signed:
+                out.append(elt.signExtend(out_size))
+            else:
+                out.append(elt.zeroExtend(out_size))
+        return [m2_expr.ExprAssign(dst, m2_expr.ExprCompose(*out))], []
+    return pmovx_instr
+
+
+pmovzxbw = _pmovx(8, 16, False)
+pmovzxbd = _pmovx(8, 32, False)
+pmovzxbq = _pmovx(8, 64, False)
+pmovzxwd = _pmovx(16, 32, False)
+pmovzxwq = _pmovx(16, 64, False)
+pmovzxdq = _pmovx(32, 64, False)
+
+
+_FP_ROUNDING_MODE = {
+    0x0: 'fpround_towardsnearest',
+    0x1: 'fpround_down',
+    0x2: 'fpround_up',
+    0x3: 'fpround_towardszero'
+}
+
+
+def _fp_round(expr, control):
+    if control & 0x4:
+        # Use MXCSR rounding config
+        # TODO: here we assume it's round to nearest, ties to even
+        return m2_expr.ExprOp('fpround_towardsnearest', expr)
+    return m2_expr.ExprOp(_FP_ROUNDING_MODE[control & 0x3], expr)
+
+
+def roundps(_, instr, dst, src, imm8):
+    out = [_fp_round(elt, int(imm8)) for elt in _elts(src, 32)]
+    return [m2_expr.ExprAssign(dst, m2_expr.ExprCompose(*out))], []
+
+
+def roundpd(_, instr, dst, src, imm8):
+    out = [_fp_round(elt, int(imm8)) for elt in _elts(src, 64)]
+    return [m2_expr.ExprAssign(dst, m2_expr.ExprCompose(*out))], []
+
+
+# CRC32 (Castagnoli polynomial, bit reflected)
+_CRC32C_POLY = 0x82F63B78
+_crc32c_cache = {}
+
+
+def _crc32c_bit_terms(data_size):
+    """CRC32C is linear over GF(2): each output bit is the XOR of a subset
+    of the input bits. Return, for each output bit, the subset as a bitmask
+    (bit i < 32: bit i of the previous CRC, bit 32 + j: bit j of the data)"""
+    if data_size in _crc32c_cache:
+        return _crc32c_cache[data_size]
+    state = [1 << i for i in range(32)]
+    for j in range(data_size):
+        feedback = state[0] ^ (1 << (32 + j))
+        state = state[1:] + [0]
+        for i in range(32):
+            if (_CRC32C_POLY >> i) & 1:
+                state[i] ^= feedback
+    _crc32c_cache[data_size] = state
+    return state
+
+
+def crc32(_, instr, dst, src):
+    crc = dst[:32]
+    bits = []
+    for mask in _crc32c_bit_terms(src.size):
+        terms = [crc[i:i + 1] for i in range(32) if (mask >> i) & 1]
+        terms += [src[j:j + 1] for j in range(src.size)
+                  if (mask >> (32 + j)) & 1]
+        bits.append(_xor_all(terms))
+    result = m2_expr.ExprCompose(*bits)
+    return [m2_expr.ExprAssign(dst, result.zeroExtend(dst.size))], []
+
+
+def popcnt(_, instr, dst, src):
+    e = []
+    bits = [src[i:i + 1].zeroExtend(dst.size) for i in range(src.size)]
+    e.append(m2_expr.ExprAssign(dst, m2_expr.ExprOp('+', *bits)))
+    e.append(m2_expr.ExprAssign(zf, m2_expr.ExprCond(src,
+                                                     m2_expr.ExprInt(0, 1),
+                                                     m2_expr.ExprInt(1, 1))))
+    for flag in (cf, of, nf, pf, af):
+        e.append(m2_expr.ExprAssign(flag, m2_expr.ExprInt(0, 1)))
+    return e, []
+
+
+# String comparisons (PCMPESTRI / PCMPESTRM / PCMPISTRI / PCMPISTRM)
+
+def _pcmpstr(instr, str1, str2, imm8, explicit, index):
+    """
+    @str1: first operand (xmm1)
+    @str2: second operand (xmm2/m128)
+    @explicit: lengths are given by (E/R)AX and (E/R)DX instead of the
+    first null element
+    @index: output the index in (E)CX instead of the mask in XMM0
+    """
+    control = int(imm8)
+    size = 16 if control & 1 else 8
+    count = 128 // size
+    signed = bool(control & 2)
+    aggregation = (control >> 2) & 3
+    polarity = (control >> 4) & 3
+    out_select = (control >> 6) & 1
+
+    elts1, elts2 = _elts(str1, size), _elts(str2, size)
+    bit0, bit1 = m2_expr.ExprInt(0, 1), m2_expr.ExprInt(1, 1)
+
+    # valid[i]: element i is before the end of the string
+    if explicit:
+        if instr.v_opmode() == 64:
+            len1, len2 = mRAX[64], mRDX[64]
+        else:
+            len1, len2 = mRAX[32], mRDX[32]
+
+        def get_valid(length):
+            length = _absolute(length)
+            return [m2_expr.expr_is_unsigned_greater(
+                length, m2_expr.ExprInt(i, length.size)
+            ) for i in range(count)]
+        valid1, valid2 = get_valid(len1), get_valid(len2)
+    else:
+        def get_valid(elts):
+            out = []
+            for elt in elts:
+                not_null = m2_expr.ExprCond(elt, bit1, bit0)
+                out.append(not_null if not out else out[-1] & not_null)
+            return out
+        valid1, valid2 = get_valid(elts1), get_valid(elts2)
+
+    def bool_res(j, i):
+        """Comparison of str2[j] with str1[i], with invalid elements
+        overrides"""
+        if aggregation == 1:
+            # Ranges: str1 is a list of (lower bound, upper bound)
+            if signed:
+                func = (m2_expr.expr_is_signed_greater_or_equal if i % 2 == 0
+                        else m2_expr.expr_is_signed_lower_or_equal)
+            else:
+                func = (m2_expr.expr_is_unsigned_greater_or_equal if i % 2 == 0
+                        else m2_expr.expr_is_unsigned_lower_or_equal)
+            base = func(elts2[j], elts1[i])
+        else:
+            base = m2_expr.expr_is_equal(elts2[j], elts1[i])
+        if aggregation in (0, 1):
+            return base & valid1[i] & valid2[j]
+        elif aggregation == 2:
+            return m2_expr.ExprCond(valid1[i],
+                                    valid2[j] & base,
+                                    ~valid2[j])
+        return m2_expr.ExprCond(valid1[i], valid2[j] & base, bit1)
+
+    int_res1 = []
+    for j in range(count):
+        if aggregation == 0:
+            # Equal any
+            res = _or_all([bool_res(j, i) for i in range(count)])
+        elif aggregation == 1:
+            # Ranges
+            res = _or_all([bool_res(j, i) & bool_res(j, i + 1)
+                           for i in range(0, count, 2)])
+        elif aggregation == 2:
+            # Equal each
+            res = bool_res(j, j)
+        else:
+            # Equal ordered
+            res = _and_all([bool_res(j + i, i) for i in range(count - j)])
+        int_res1.append(res)
+
+    if polarity in (0, 2):
+        int_res2 = int_res1
+    elif polarity == 1:
+        int_res2 = [~res for res in int_res1]
+    else:
+        int_res2 = [m2_expr.ExprCond(valid2[j], ~res, res)
+                    for j, res in enumerate(int_res1)]
+
+    e = []
+    if index:
+        result = m2_expr.ExprInt(count, 32)
+        order = range(count) if out_select else reversed(range(count))
+        for j in order:
+            result = m2_expr.ExprCond(int_res2[j], m2_expr.ExprInt(j, 32),
+                                      result)
+        if instr.mode == 64:
+            e.append(m2_expr.ExprAssign(mRCX[64], result.zeroExtend(64)))
+        else:
+            e.append(m2_expr.ExprAssign(mRCX[32], result))
+    else:
+        if out_select:
+            result = m2_expr.ExprCompose(*[res.signExtend(size)
+                                           for res in int_res2])
+        else:
+            result = m2_expr.ExprCompose(*int_res2).zeroExtend(128)
+        e.append(m2_expr.ExprAssign(regs_xmm_expr[0], result))
+
+    e.append(m2_expr.ExprAssign(cf, _or_all(int_res2)))
+    e.append(m2_expr.ExprAssign(zf, ~valid2[-1]))
+    e.append(m2_expr.ExprAssign(nf, ~valid1[-1]))
+    e.append(m2_expr.ExprAssign(of, int_res2[0]))
+    e.append(m2_expr.ExprAssign(af, bit0))
+    e.append(m2_expr.ExprAssign(pf, bit0))
+    return e, []
+
+
+def pcmpestri(_, instr, dst, src, imm8):
+    return _pcmpstr(instr, dst, src, imm8, explicit=True, index=True)
+
+
+def pcmpestrm(_, instr, dst, src, imm8):
+    return _pcmpstr(instr, dst, src, imm8, explicit=True, index=False)
+
+
+def pcmpistri(_, instr, dst, src, imm8):
+    return _pcmpstr(instr, dst, src, imm8, explicit=False, index=True)
+
+
+def pcmpistrm(_, instr, dst, src, imm8):
+    return _pcmpstr(instr, dst, src, imm8, explicit=False, index=False)
+
+
+# AES
+#
+# The S-Box is the only non linear part of AES: it is modeled by the
+# 'aes_sbox' / 'aes_inv_sbox' operators (8 bits -> 8 bits), everything else is
+# expressed with standard operators
+
+def _aes_sub_bytes(state, inverse=False):
+    op = 'aes_inv_sbox' if inverse else 'aes_sbox'
+    return [m2_expr.ExprOp(op, byte) for byte in state]
+
+
+def _aes_shift_rows(state, inverse=False):
+    out = [None] * 16
+    for col in range(4):
+        for row in range(4):
+            src_col = (col - row) % 4 if inverse else (col + row) % 4
+            out[row + 4 * col] = state[row + 4 * src_col]
+    return out
+
+
+def _aes_xtime(byte):
+    """Multiplication by 2 in GF(2^8) (modulo x^8 + x^4 + x^3 + x + 1)"""
+    high = byte[7:8]
+    return m2_expr.ExprCompose(
+        high,
+        byte[0:1] ^ high,
+        byte[1:2],
+        byte[2:3] ^ high,
+        byte[3:4] ^ high,
+        byte[4:7],
+    )
+
+
+def _aes_gmul(byte, constant):
+    """Multiplication of @byte by the @constant in GF(2^8)"""
+    terms = []
+    while constant:
+        if constant & 1:
+            terms.append(byte)
+        constant >>= 1
+        if constant:
+            byte = _aes_xtime(byte)
+    return terms
+
+
+def _aes_mix_columns(state, inverse=False):
+    coeffs = [0xe, 0xb, 0xd, 0x9] if inverse else [2, 3, 1, 1]
+    out = []
+    for col in range(4):
+        column = state[4 * col:4 * col + 4]
+        for row in range(4):
+            terms = []
+            for j in range(4):
+                terms += _aes_gmul(column[j], coeffs[(j - row) % 4])
+            out.append(_xor_all(terms))
+    return out
+
+
+def _aes_round(dst, src, inverse, last):
+    state = _elts(dst, 8)
+    state = _aes_shift_rows(state, inverse)
+    state = _aes_sub_bytes(state, inverse)
+    if not last:
+        state = _aes_mix_columns(state, inverse)
+    return [m2_expr.ExprAssign(dst, m2_expr.ExprCompose(*state) ^ src)], []
+
+
+def aesenc(_, instr, dst, src):
+    return _aes_round(dst, src, inverse=False, last=False)
+
+
+def aesenclast(_, instr, dst, src):
+    return _aes_round(dst, src, inverse=False, last=True)
+
+
+def aesdec(_, instr, dst, src):
+    return _aes_round(dst, src, inverse=True, last=False)
+
+
+def aesdeclast(_, instr, dst, src):
+    return _aes_round(dst, src, inverse=True, last=True)
+
+
+def aesimc(_, instr, dst, src):
+    state = _aes_mix_columns(_elts(src, 8), inverse=True)
+    return [m2_expr.ExprAssign(dst, m2_expr.ExprCompose(*state))], []
+
+
+def aeskeygenassist(_, instr, dst, src, imm8):
+    rcon = m2_expr.ExprInt(int(imm8) & 0xff, 32)
+
+    def sub_word(word):
+        return m2_expr.ExprCompose(*_aes_sub_bytes(_elts(word, 8)))
+
+    def rot_word(word):
+        return m2_expr.ExprCompose(word[8:32], word[0:8])
+
+    word1 = sub_word(src[32:64])
+    word3 = sub_word(src[96:128])
+    result = m2_expr.ExprCompose(
+        word1,
+        rot_word(word1) ^ rcon,
+        word3,
+        rot_word(word3) ^ rcon,
+    )
+    return [m2_expr.ExprAssign(dst, result)], []
+
+
+# SHA
+
+def _rol32(expr, count):
+    return m2_expr.ExprOp('<<<', expr, m2_expr.ExprInt(count, 32))
+
+
+def _ror32(expr, count):
+    return m2_expr.ExprOp('>>>', expr, m2_expr.ExprInt(count, 32))
+
+
+def _sha_ch(x, y, z):
+    return (x & y) ^ ((x ^ x.mask) & z)
+
+
+def _sha_maj(x, y, z):
+    return (x & y) ^ (x & z) ^ (y & z)
+
+
+def _sha_parity(x, y, z):
+    return x ^ y ^ z
+
+
+_SHA1_ROUNDS = [
+    (_sha_ch, 0x5A827999),
+    (_sha_parity, 0x6ED9EBA1),
+    (_sha_maj, 0x8F1BBCDC),
+    (_sha_parity, 0xCA62C1D6),
+]
+
+
+def sha1rnds4(_, instr, dst, src, imm8):
+    func, constant = _SHA1_ROUNDS[int(imm8) & 3]
+    constant = m2_expr.ExprInt(constant, 32)
+    d, c, b, a = _elts(dst, 32)
+    words = _elts(src, 32)[::-1]
+    # Round 0: E is already added in the first word (see SHA1NEXTE)
+    e = m2_expr.ExprInt(0, 32)
+    for i in range(4):
+        new_a = func(b, c, d) + _rol32(a, 5) + words[i] + e + constant
+        a, b, c, d, e = new_a, a, _rol32(b, 30), c, d
+    return [m2_expr.ExprAssign(dst, m2_expr.ExprCompose(d, c, b, a))], []
+
+
+def sha1nexte(_, instr, dst, src):
+    result = m2_expr.ExprCompose(src[:96], src[96:128] + _rol32(dst[96:128], 30))
+    return [m2_expr.ExprAssign(dst, result)], []
+
+
+def sha1msg1(_, instr, dst, src):
+    w3, w2, w1, w0 = _elts(dst, 32)
+    w5, w4 = src[64:96], src[96:128]
+    result = m2_expr.ExprCompose(w5 ^ w3, w4 ^ w2, w3 ^ w1, w2 ^ w0)
+    return [m2_expr.ExprAssign(dst, result)], []
+
+
+def sha1msg2(_, instr, dst, src):
+    w13, w14, w15 = src[64:96], src[32:64], src[0:32]
+    w16 = _rol32(dst[96:128] ^ w13, 1)
+    w17 = _rol32(dst[64:96] ^ w14, 1)
+    w18 = _rol32(dst[32:64] ^ w15, 1)
+    w19 = _rol32(dst[0:32] ^ w16, 1)
+    result = m2_expr.ExprCompose(w19, w18, w17, w16)
+    return [m2_expr.ExprAssign(dst, result)], []
+
+
+def sha256rnds2(_, instr, dst, src):
+    # The message words + round constants are in the implicit XMM0
+    wk = _elts(regs_xmm_expr[0], 32)[:2]
+    f, e, b, a = _elts(src, 32)
+    h, g, d, c = _elts(dst, 32)
+    for i in range(2):
+        tmp = (_sha_ch(e, f, g) +
+               (_ror32(e, 6) ^ _ror32(e, 11) ^ _ror32(e, 25)) +
+               wk[i] + h)
+        new_a = (tmp + _sha_maj(a, b, c) +
+                 (_ror32(a, 2) ^ _ror32(a, 13) ^ _ror32(a, 22)))
+        new_e = tmp + d
+        a, b, c, d, e, f, g, h = new_a, a, b, c, new_e, e, f, g
+    return [m2_expr.ExprAssign(dst, m2_expr.ExprCompose(f, e, b, a))], []
+
+
+def _sha256_sigma0(word):
+    return (_ror32(word, 7) ^ _ror32(word, 18) ^
+            (word >> m2_expr.ExprInt(3, 32)))
+
+
+def _sha256_sigma1(word):
+    return (_ror32(word, 17) ^ _ror32(word, 19) ^
+            (word >> m2_expr.ExprInt(10, 32)))
+
+
+def sha256msg1(_, instr, dst, src):
+    w0, w1, w2, w3 = _elts(dst, 32)
+    w4 = src[0:32]
+    result = m2_expr.ExprCompose(
+        w0 + _sha256_sigma0(w1),
+        w1 + _sha256_sigma0(w2),
+        w2 + _sha256_sigma0(w3),
+        w3 + _sha256_sigma0(w4),
+    )
+    return [m2_expr.ExprAssign(dst, result)], []
+
+
+def sha256msg2(_, instr, dst, src):
+    w14, w15 = src[64:96], src[96:128]
+    w16 = dst[0:32] + _sha256_sigma1(w14)
+    w17 = dst[32:64] + _sha256_sigma1(w15)
+    w18 = dst[64:96] + _sha256_sigma1(w16)
+    w19 = dst[96:128] + _sha256_sigma1(w17)
+    result = m2_expr.ExprCompose(w16, w17, w18, w19)
+    return [m2_expr.ExprAssign(dst, result)], []
+
+
+mnemo_func.update({
+    "rcpps": rcpps,
+    "rcpss": rcpss,
+    "rsqrtps": rsqrtps,
+    "rsqrtss": rsqrtss,
+    "pshufw": pshufw,
+    "movntps": sse_mov,
+    "movntpd": sse_mov,
+    "movntdq": sse_mov,
+    "movntq": sse_mov,
+    "movntdqa": sse_mov,
+    "movnti": sse_mov,
+    "lddqu": sse_mov,
+    "clflush": sse_nop,
+    "clflushopt": sse_nop,
+    "movddup": movddup,
+    "movsldup": movsldup,
+    "movshdup": movshdup,
+    "addsubps": addsubps,
+    "addsubpd": addsubpd,
+    "haddps": haddps,
+    "haddpd": haddpd,
+    "hsubps": hsubps,
+    "hsubpd": hsubpd,
+    "pabsb": pabsb,
+    "pabsw": pabsw,
+    "pabsd": pabsd,
+    "phaddw": phaddw,
+    "phaddd": phaddd,
+    "phaddsw": phaddsw,
+    "phsubw": phsubw,
+    "phsubd": phsubd,
+    "phsubsw": phsubsw,
+    "pmaddubsw": pmaddubsw,
+    "pmulhrsw": pmulhrsw,
+    "blendpd": blendpd,
+    "blendvps": blendvps,
+    "blendvpd": blendvpd,
+    "pblendvb": pblendvb,
+    "dpps": dpps,
+    "dppd": dppd,
+    "extractps": extractps,
+    "insertps": insertps,
+    "pmovzxbw": pmovzxbw,
+    "pmovzxbd": pmovzxbd,
+    "pmovzxbq": pmovzxbq,
+    "pmovzxwd": pmovzxwd,
+    "pmovzxwq": pmovzxwq,
+    "pmovzxdq": pmovzxdq,
+    "roundps": roundps,
+    "roundpd": roundpd,
+    "crc32": crc32,
+    "popcnt": popcnt,
+    "pcmpestri": pcmpestri,
+    "pcmpestrm": pcmpestrm,
+    "pcmpistri": pcmpistri,
+    "pcmpistrm": pcmpistrm,
+    "aesenc": aesenc,
+    "aesenclast": aesenclast,
+    "aesdec": aesdec,
+    "aesdeclast": aesdeclast,
+    "aesimc": aesimc,
+    "aeskeygenassist": aeskeygenassist,
+    "sha1rnds4": sha1rnds4,
+    "sha1nexte": sha1nexte,
+    "sha1msg1": sha1msg1,
+    "sha1msg2": sha1msg2,
+    "sha256rnds2": sha256rnds2,
+    "sha256msg1": sha256msg1,
+    "sha256msg2": sha256msg2,
+})
+
+
+###############################################################################
+# AVX / AVX2 (VEX encoded instructions)
+###############################################################################
+#
+# YMMx only exists as an instruction operand: the state is made of XMMx (low
+# 128 bits) and YMMx_H (high 128 bits). A VEX encoded instruction writing an
+# XMM register clears the associated YMMx_H.
+#
+# Most of the VEX instructions are the non destructive (dst, src1, src2)
+# version of a legacy SSE one, working on each 128 bit lane. Their semantic is
+# then derived from the legacy implementation.
+
+def _vex_src(expr):
+    """Replace YMMx operands by their state representation"""
+    return expr.replace_expr(ymm_to_state)
+
+
+def _vex_write(dst, value):
+    """Assign @value to the operand @dst of a VEX encoded instruction"""
+    if dst in regs_ymm_expr:
+        index = regs_ymm_expr.index(dst)
+        return [
+            m2_expr.ExprAssign(regs_xmm_expr[index], value[:128]),
+            m2_expr.ExprAssign(regs_ymmh_expr[index], value[128:]),
+        ]
+    if dst in regs_xmm_expr:
+        index = regs_xmm_expr.index(dst)
+        return [
+            m2_expr.ExprAssign(dst, value.zeroExtend(128)),
+            m2_expr.ExprAssign(regs_ymmh_expr[index],
+                               m2_expr.ExprInt(0, 128)),
+        ]
+    return [m2_expr.ExprAssign(dst, value)]
+
+
+def _legacy_value(func, ir, instr, dst_value, src_value, *extra):
+    """Evaluate the legacy SSE semantic @func(dst, src, *extra), with @dst
+    initially holding @dst_value.
+    Return the resulting value of dst, and the other assignments (flags, ...)
+    """
+    ph_dst = m2_expr.ExprId("__vex_dst", dst_value.size)
+    replacements = {ph_dst: dst_value}
+    args = [ph_dst]
+    if src_value is not None:
+        if src_value.is_int():
+            args.append(src_value)
+        else:
+            ph_src = m2_expr.ExprId("__vex_src", src_value.size)
+            replacements[ph_src] = src_value
+            args.append(ph_src)
+    assigns, extra_ir = func(ir, instr, *(args + list(extra)))
+    assert not extra_ir
+    value = dst_value
+    others = []
+    for dst, src in viewitems(AssignBlock(assigns)):
+        src = src.replace_expr(replacements)
+        if dst == ph_dst:
+            value = src
+        else:
+            others.append(m2_expr.ExprAssign(dst, src))
+    return value, others
+
+
+def _lanes(expr, dst_size):
+    """Split @expr in 128 bit lanes if it is a full vector operand"""
+    if dst_size > 128 and expr.size == dst_size:
+        return _elts(expr, 128)
+    return [expr] * (dst_size // 128)
+
+
+def vex_lane(func, imm_shift=0):
+    """VEX version (dst, src1, src2[, imm8]) of the legacy SSE @func, applied
+    on each 128 bit lane.
+    @imm_shift: number of imm8 bits consumed by each lane (0 if the same
+    immediate is used for every lane)"""
+    def vex_lane_instr(ir, instr, dst, src1, src2, *extra):
+        src1, src2 = _vex_src(src1), _vex_src(src2)
+        size = max(dst.size, 128)
+        values, others = [], []
+        for index, (lane1, lane2) in enumerate(zip(_lanes(src1, size),
+                                                   _lanes(src2, size))):
+            lane_extra = extra
+            if imm_shift and extra:
+                imm = int(extra[0]) >> (imm_shift * index)
+                lane_extra = (m2_expr.ExprInt(imm & 0xff, 8),) + extra[1:]
+            value, other = _legacy_value(func, ir, instr, lane1, lane2,
+                                         *lane_extra)
+            values.append(value)
+            others += other
+        value = values[0] if len(values) == 1 else m2_expr.ExprCompose(*values)
+        return _vex_write(dst, value) + others, []
+    return vex_lane_instr
+
+
+def vex_lane_unary(func):
+    """VEX version (dst, src[, imm8]) of the legacy SSE @func, applied on each
+    128 bit lane. The legacy result must not depend on the destination"""
+    def vex_lane_unary_instr(ir, instr, dst, src, *extra):
+        src = _vex_src(src)
+        size = max(dst.size, 128)
+        values = []
+        for lane in _lanes(src, size):
+            value, _ = _legacy_value(func, ir, instr,
+                                     m2_expr.ExprInt(0, 128), lane, *extra)
+            values.append(value)
+        value = values[0] if len(values) == 1 else m2_expr.ExprCompose(*values)
+        return _vex_write(dst, value), []
+    return vex_lane_unary_instr
+
+
+def vex_lane_shift_imm(func):
+    """VEX version (dst, src, imm8) of the legacy SSE shift @func(dst, imm8),
+    applied on each 128 bit lane"""
+    def vex_lane_shift_imm_instr(ir, instr, dst, src, imm):
+        src = _vex_src(src)
+        values = []
+        for lane in _lanes(src, dst.size):
+            value, _ = _legacy_value(func, ir, instr, lane, imm)
+            values.append(value)
+        value = values[0] if len(values) == 1 else m2_expr.ExprCompose(*values)
+        return _vex_write(dst, value), []
+    return vex_lane_shift_imm_instr
+
+
+def vex_full(func):
+    """VEX version (dst, src1, src2, *extra) of the legacy SSE @func, which
+    has to be generic regarding the vector size"""
+    def vex_full_instr(ir, instr, dst, src1, src2, *extra):
+        extra = [_vex_src(arg) for arg in extra]
+        value, others = _legacy_value(func, ir, instr, _vex_src(src1),
+                                      _vex_src(src2), *extra)
+        return _vex_write(dst, value) + others, []
+    return vex_full_instr
+
+
+def vex_direct(func):
+    """VEX version of a legacy SSE @func with the same operands, and without
+    YMM destination"""
+    def vex_direct_instr(ir, instr, *args):
+        args = [_vex_src(arg) for arg in args]
+        assigns, extra_ir = func(ir, instr, *args)
+        assigns = list(assigns)
+        cleared = set()
+        for assign in list(assigns):
+            if assign.dst in regs_xmm_expr and assign.dst not in cleared:
+                cleared.add(assign.dst)
+                index = regs_xmm_expr.index(assign.dst)
+                assigns.append(m2_expr.ExprAssign(regs_ymmh_expr[index],
+                                                  m2_expr.ExprInt(0, 128)))
+        return assigns, extra_ir
+    return vex_direct_instr
+
+
+def vmov(_, instr, dst, src):
+    return _vex_write(dst, _vex_src(src)), []
+
+
+def _vmov_scalar(size):
+    def vmov_scalar_instr(_, instr, dst, src1, src2=None):
+        if src2 is None:
+            if dst.is_mem():
+                # vmovss m32, xmm1
+                return [m2_expr.ExprAssign(dst, src1[:size])], []
+            # vmovss xmm1, m32
+            return _vex_write(dst, src1.zeroExtend(128)), []
+        # vmovss xmm1, xmm2, xmm3
+        value = m2_expr.ExprCompose(src2[:size], src1[size:])
+        return _vex_write(dst, value), []
+    return vmov_scalar_instr
+
+
+def _vmov_half(high):
+    def vmov_half_instr(_, instr, dst, src1, src2=None):
+        if src2 is None:
+            # vmovlps m64, xmm1
+            value = src1[64:128] if high else src1[:64]
+            return [m2_expr.ExprAssign(dst, value)], []
+        # vmovlps xmm1, xmm2, m64
+        if high:
+            value = m2_expr.ExprCompose(src1[:64], src2)
+        else:
+            value = m2_expr.ExprCompose(src2, src1[64:128])
+        return _vex_write(dst, value), []
+    return vmov_half_instr
+
+
+def vmovhlps(_, instr, dst, src1, src2):
+    return _vex_write(dst, m2_expr.ExprCompose(src2[64:128], src1[64:128])), []
+
+
+def vmovlhps(_, instr, dst, src1, src2):
+    return _vex_write(dst, m2_expr.ExprCompose(src1[:64], src2[:64])), []
+
+
+def vmovd(_, instr, dst, src):
+    if dst in regs_xmm_expr:
+        if src.size > 64:
+            src = src[:64]
+        return _vex_write(dst, src.zeroExtend(128)), []
+    return [m2_expr.ExprAssign(dst, src[:dst.size])], []
+
+
+def _vmovmsk(size):
+    def vmovmsk_instr(_, instr, dst, src):
+        src = _vex_src(src)
+        bits = [elt.msb() for elt in _elts(src, size)]
+        value = m2_expr.ExprCompose(*bits).zeroExtend(dst.size)
+        return [m2_expr.ExprAssign(dst, value)], []
+    return vmovmsk_instr
+
+
+def vzeroupper(_, instr):
+    count = 16 if instr.mode == 64 else 8
+    return [m2_expr.ExprAssign(reg, m2_expr.ExprInt(0, 128))
+            for reg in regs_ymmh_expr[:count]], []
+
+
+def vzeroall(_, instr):
+    count = 16 if instr.mode == 64 else 8
+    return [m2_expr.ExprAssign(reg, m2_expr.ExprInt(0, 128))
+            for reg in regs_xmm_expr[:count] + regs_ymmh_expr[:count]], []
+
+
+# Float comparisons, with the 32 VEX predicates
+# Result if both operands are ordered, for (predicate & 0xf)
+_VCMP_ORDERED = ["eq", "lt", "le", "false", "neq", "nlt", "nle", "true",
+                 "eq", "lt", "le", "false", "neq", "nlt", "nle", "true"]
+# Result if at least one operand is a NaN
+_VCMP_UNORDERED = [0, 0, 0, 1, 1, 1, 1, 0,
+                   1, 1, 1, 0, 0, 0, 0, 1]
+
+
+def _float_compare(predicate, op1, op2):
+    """Return the mask resulting of the comparison @predicate (imm8 of
+    CMPPS, VCMPPS, ...) of @op1 and @op2"""
+    predicate &= 0xf
+    equal = m2_expr.expr_is_float_equal(op1, op2)
+    # -0.0 is not lower than +0.0
+    lower = m2_expr.expr_is_float_lower(op1, op2) & ~equal
+    ordered = {
+        "eq": equal,
+        "lt": lower,
+        "le": lower | equal,
+        "neq": ~equal,
+        "nlt": ~lower,
+        "nle": ~(lower | equal),
+        "false": m2_expr.ExprInt(0, 1),
+        "true": m2_expr.ExprInt(1, 1),
+    }[_VCMP_ORDERED[predicate]]
+    result = m2_expr.ExprCond(
+        m2_expr.expr_is_NaN(op1) | m2_expr.expr_is_NaN(op2),
+        m2_expr.ExprInt(_VCMP_UNORDERED[predicate], 1),
+        ordered
+    )
+    return result.signExtend(op1.size)
+
+
+def _vcmp(size, scalar):
+    def vcmp_instr(_, instr, dst, src1, src2, imm8):
+        src1, src2 = _vex_src(src1), _vex_src(src2)
+        predicate = int(imm8) & 0x1f
+        if scalar:
+            value = m2_expr.ExprCompose(
+                _float_compare(predicate, src1[:size], src2[:size]),
+                src1[size:]
+            )
+        else:
+            value = m2_expr.ExprCompose(*[
+                _float_compare(predicate, elt1, elt2)
+                for elt1, elt2 in zip(_elts(src1, size), _elts(src2, size))
+            ])
+        return _vex_write(dst, value), []
+    return vcmp_instr
+
+
+def _vtest(size):
+    """VTESTPS / VTESTPD: PTEST restricted to the sign bits"""
+    def vtest_instr(_, instr, src1, src2):
+        src1, src2 = _vex_src(src1), _vex_src(src2)
+        signs_and = [(elt1 & elt2).msb()
+                     for elt1, elt2 in zip(_elts(src1, size),
+                                           _elts(src2, size))]
+        signs_andn = [((elt1 ^ elt1.mask) & elt2).msb()
+                      for elt1, elt2 in zip(_elts(src1, size),
+                                            _elts(src2, size))]
+        e = [
+            m2_expr.ExprAssign(zf, ~_or_all(signs_and)),
+            m2_expr.ExprAssign(cf, ~_or_all(signs_andn)),
+        ]
+        for flag in (of, af, pf, nf):
+            e.append(m2_expr.ExprAssign(flag, m2_expr.ExprInt(0, 1)))
+        return e, []
+    return vtest_instr
+
+
+def vptest(ir, instr, src1, src2):
+    return ptest(ir, instr, _vex_src(src1), _vex_src(src2))
+
+
+def _vcvt(in_size, out_size, func, count_from_src=False):
+    """Packed conversion: @func is applied on each @in_size bits element"""
+    def vcvt_instr(_, instr, dst, src):
+        src = _vex_src(src)
+        if count_from_src:
+            count = src.size // in_size
+        else:
+            count = dst.size // out_size
+        out = [func(src[i * in_size:(i + 1) * in_size]) for i in range(count)]
+        value = m2_expr.ExprCompose(*out)
+        return _vex_write(dst, value.zeroExtend(max(dst.size, value.size))), []
+    return vcvt_instr
+
+
+def _vpmovx(in_size, out_size, signed):
+    func = _pmovx(in_size, out_size, signed)
+
+    def vpmovx_instr(ir, instr, dst, src):
+        value, _ = _legacy_value(func, ir, instr,
+                                 m2_expr.ExprInt(0, dst.size), _vex_src(src))
+        return _vex_write(dst, value), []
+    return vpmovx_instr
+
+
+def _vbroadcast(size):
+    def vbroadcast_instr(_, instr, dst, src):
+        elt = src[:size]
+        value = m2_expr.ExprCompose(*([elt] * (dst.size // size)))
+        return _vex_write(dst, value), []
+    return vbroadcast_instr
+
+
+def vextract128(_, instr, dst, src, imm8):
+    src = _vex_src(src)
+    lane = (int(imm8) & 1) * 128
+    return _vex_write(dst, src[lane:lane + 128]), []
+
+
+def vinsert128(_, instr, dst, src1, src2, imm8):
+    lanes = _elts(_vex_src(src1), 128)
+    lanes[int(imm8) & 1] = src2
+    return _vex_write(dst, m2_expr.ExprCompose(*lanes)), []
+
+
+def vperm2x128(_, instr, dst, src1, src2, imm8):
+    control = int(imm8)
+    lanes = _elts(_vex_src(src1), 128) + _elts(_vex_src(src2), 128)
+    out = []
+    for shift in (0, 4):
+        sel = (control >> shift) & 0xf
+        if sel & 8:
+            out.append(m2_expr.ExprInt(0, 128))
+        else:
+            out.append(lanes[sel & 3])
+    return _vex_write(dst, m2_expr.ExprCompose(*out)), []
+
+
+def _select_elt(vector, index, size):
+    """Return the @size bits element number @index (Expr) of @vector"""
+    shift = index.zeroExtend(vector.size) * m2_expr.ExprInt(size, vector.size)
+    return (vector >> shift)[:size]
+
+
+def vpermilps(_, instr, dst, src1, src2):
+    src1, src2 = _vex_src(src1), _vex_src(src2)
+    out = []
+    if src2.is_int():
+        # Same immediate for each lane
+        control = int(src2)
+        for lane in _elts(src1, 128):
+            for i in range(4):
+                sel = ((control >> (2 * i)) & 3) * 32
+                out.append(lane[sel:sel + 32])
+    else:
+        for lane, lane_ctl in zip(_elts(src1, 128), _elts(src2, 128)):
+            for ctl in _elts(lane_ctl, 32):
+                out.append(_select_elt(lane, ctl[:2], 32))
+    return _vex_write(dst, m2_expr.ExprCompose(*out)), []
+
+
+def vpermilpd(_, instr, dst, src1, src2):
+    src1, src2 = _vex_src(src1), _vex_src(src2)
+    out = []
+    if src2.is_int():
+        control = int(src2)
+        for index, lane in enumerate(_elts(src1, 128)):
+            for i in range(2):
+                sel = ((control >> (2 * index + i)) & 1) * 64
+                out.append(lane[sel:sel + 64])
+    else:
+        for lane, lane_ctl in zip(_elts(src1, 128), _elts(src2, 128)):
+            for ctl in _elts(lane_ctl, 64):
+                # The selector is the bit 1
+                out.append(m2_expr.ExprCond(ctl[1:2], lane[64:128], lane[:64]))
+    return _vex_write(dst, m2_expr.ExprCompose(*out)), []
+
+
+def vpermq(_, instr, dst, src, imm8):
+    src = _vex_src(src)
+    control = int(imm8)
+    out = []
+    for i in range(4):
+        sel = ((control >> (2 * i)) & 3) * 64
+        out.append(src[sel:sel + 64])
+    return _vex_write(dst, m2_expr.ExprCompose(*out)), []
+
+
+def vpermd(_, instr, dst, src1, src2):
+    """dst[i] = src2[src1[i]]"""
+    src1, src2 = _vex_src(src1), _vex_src(src2)
+    out = [_select_elt(src2, index[:3], 32) for index in _elts(src1, 32)]
+    return _vex_write(dst, m2_expr.ExprCompose(*out)), []
+
+
+def _vshift_var(op, size):
+    """Per element variable shift (VPSLLVD, ...)"""
+    def vshift_var_instr(_, instr, dst, src1, src2):
+        src1, src2 = _vex_src(src1), _vex_src(src2)
+        out = []
+        for elt, count in zip(_elts(src1, size), _elts(src2, size)):
+            in_range = m2_expr.expr_is_unsigned_lower(
+                count, m2_expr.ExprInt(size, size)
+            )
+            if op == "a>>":
+                overflow = m2_expr.ExprOp(op, elt,
+                                          m2_expr.ExprInt(size - 1, size))
+            else:
+                overflow = m2_expr.ExprInt(0, size)
+            out.append(m2_expr.ExprCond(in_range,
+                                        m2_expr.ExprOp(op, elt, count),
+                                        overflow))
+        return _vex_write(dst, m2_expr.ExprCompose(*out)), []
+    return vshift_var_instr
+
+
+def _vmaskmov(size):
+    """Conditional move, controlled by the sign bit of each mask element.
+    Faults are not suppressed on masked elements in this model: the whole
+    memory operand is accessed"""
+    def vmaskmov_instr(_, instr, dst, mask, src):
+        mask, src = _vex_src(mask), _vex_src(src)
+        if dst.is_mem():
+            previous = _elts(dst, size)
+        else:
+            previous = [m2_expr.ExprInt(0, size)] * (dst.size // size)
+        out = [m2_expr.ExprCond(sel.msb(), elt, old)
+               for sel, elt, old in zip(_elts(mask, size), _elts(src, size),
+                                        previous)]
+        return _vex_write(dst, m2_expr.ExprCompose(*out)), []
+    return vmaskmov_instr
+
+
+def _fp_to_sint32_trunc(expr):
+    return m2_expr.ExprOp('fp_to_sint32',
+                          m2_expr.ExprOp('fpround_towardszero', expr))
+
+
+# Legacy mnemonic -> VEX mnemonic, for the "dst, src1, src2" lane version
+_VEX_LANE_BINARY = """
+addps addpd mulps mulpd subps subpd minps minpd divps divpd maxps maxpd
+andps andpd andnps andnpd orps orpd xorps xorpd
+unpcklps unpcklpd unpckhps unpckhpd
+haddps haddpd hsubps hsubpd addsubps addsubpd
+addss addsd mulss mulsd subss subsd minss minsd divss divsd maxss maxsd
+sqrtss sqrtsd rsqrtss rcpss cvtss2sd cvtsd2ss cvtsi2ss cvtsi2sd
+roundss roundsd shufps dpps dppd
+punpcklbw punpcklwd punpckldq packsswb pcmpgtb pcmpgtw pcmpgtd packuswb
+punpckhbw punpckhwd punpckhdq packssdw punpcklqdq punpckhqdq
+pcmpeqb pcmpeqw pcmpeqd paddq pmullw psubusb psubusw pminub pand paddusb
+paddusw pmaxub pandn pavgb pavgw pmulhuw pmulhw psubsb psubsw pminsw por
+paddsb paddsw pmaxsw pxor pmuludq pmaddwd psadbw psubb psubw psubd psubq
+paddb paddw paddd
+pshufb phaddw phaddd phaddsw pmaddubsw phsubw phsubd phsubsw psignb psignw
+psignd pmulhrsw pmuldq pcmpeqq packusdw pcmpgtq pminsb pminsd pminuw pminud
+pmaxsb pmaxsd pmaxuw pmaxud pmulld
+palignr pblendw pclmulqdq
+aesenc aesenclast aesdec aesdeclast
+pinsrb pinsrw pinsrd pinsrq insertps
+""".split()
+
+# Legacy mnemonic -> VEX mnemonic, for the "dst, src[, imm8]" lane version
+_VEX_LANE_UNARY = """
+sqrtps sqrtpd rsqrtps rcpps movshdup movsldup movddup
+pabsb pabsw pabsd roundps roundpd pshufd pshufhw pshuflw
+phminposuw aesimc aeskeygenassist
+""".split()
+
+# Legacy mnemonic -> VEX mnemonic, same operands
+_VEX_DIRECT = """
+comiss comisd ucomiss ucomisd
+cvtss2si cvtsd2si cvttss2si cvttsd2si
+pextrb pextrw pextrd pextrq extractps
+pcmpestri pcmpestrm pcmpistri pcmpistrm
+pmovmskb maskmovdqu ldmxcsr stmxcsr
+""".split()
+
+for _name in _VEX_LANE_BINARY:
+    mnemo_func["v" + _name] = vex_lane(mnemo_func[_name])
+for _name in _VEX_LANE_UNARY:
+    mnemo_func["v" + _name] = vex_lane_unary(mnemo_func[_name])
+for _name in _VEX_DIRECT:
+    mnemo_func["v" + _name] = vex_direct(mnemo_func[_name])
+
+# Shifts: count in a register / memory or immediate
+for _name in ["psrlw", "psrld", "psrlq", "psraw", "psrad",
+              "psllw", "pslld", "psllq", "psrldq", "pslldq"]:
+    def _vex_shift(ir, instr, dst, src1, src2, _func=mnemo_func[_name]):
+        if src2.is_int():
+            return vex_lane_shift_imm(_func)(ir, instr, dst, src1, src2)
+        return vex_lane(_func)(ir, instr, dst, src1, src2)
+    mnemo_func["v" + _name] = _vex_shift
+
+mnemo_func.update({
+    # Immediate consumed lane by lane
+    "vshufpd": vex_lane(shufpd, imm_shift=2),
+    "vmpsadbw": vex_lane(mpsadbw, imm_shift=3),
+
+    # One immediate / mask bit per element of the whole vector
+    "vblendps": vex_full(_blend_imm(32)),
+    "vblendpd": vex_full(blendpd),
+    "vpblendd": vex_full(_blend_imm(32)),
+    "vblendvps": vex_full(blendvps),
+    "vblendvpd": vex_full(blendvpd),
+    "vpblendvb": vex_full(pblendvb),
+
+    "vcmpps": _vcmp(32, False),
+    "vcmppd": _vcmp(64, False),
+    "vcmpss": _vcmp(32, True),
+    "vcmpsd": _vcmp(64, True),
+
+    # Moves
+    "vmovups": vmov,
+    "vmovupd": vmov,
+    "vmovaps": vmov,
+    "vmovapd": vmov,
+    "vmovdqa": vmov,
+    "vmovdqu": vmov,
+    "vlddqu": vmov,
+    "vmovntdqa": vmov,
+    "vmovntps": vmov,
+    "vmovntpd": vmov,
+    "vmovntdq": vmov,
+    "vmovss": _vmov_scalar(32),
+    "vmovsd": _vmov_scalar(64),
+    "vmovlps": _vmov_half(False),
+    "vmovlpd": _vmov_half(False),
+    "vmovhps": _vmov_half(True),
+    "vmovhpd": _vmov_half(True),
+    "vmovhlps": vmovhlps,
+    "vmovlhps": vmovlhps,
+    "vmovd": vmovd,
+    "vmovq": vmovd,
+    "vmovmskps": _vmovmsk(32),
+    "vmovmskpd": _vmovmsk(64),
+    "vpmovmskb": _vmovmsk(8),
+    "vzeroupper": vzeroupper,
+    "vzeroall": vzeroall,
+
+    "vptest": vptest,
+    "vtestps": _vtest(32),
+    "vtestpd": _vtest(64),
+
+    # Conversions
+    "vcvtdq2ps": _vcvt(32, 32, lambda x: m2_expr.ExprOp('sint_to_fp', x)),
+    "vcvtps2dq": _vcvt(32, 32, lambda x: m2_expr.ExprOp('fp_to_sint32', x)),
+    "vcvttps2dq": _vcvt(32, 32, _fp_to_sint32_trunc),
+    "vcvtdq2pd": _vcvt(
+        32, 64, lambda x: m2_expr.ExprOp('sint_to_fp', x.signExtend(64))
+    ),
+    "vcvtps2pd": _vcvt(32, 64, lambda x: m2_expr.ExprOp('fpconvert_fp64', x)),
+    "vcvtpd2ps": _vcvt(64, 32, lambda x: m2_expr.ExprOp('fpconvert_fp32', x),
+                       count_from_src=True),
+    "vcvtpd2dq": _vcvt(64, 32, lambda x: m2_expr.ExprOp('fp_to_sint32', x),
+                       count_from_src=True),
+    "vcvttpd2dq": _vcvt(64, 32, _fp_to_sint32_trunc, count_from_src=True),
+
+    "vpmovsxbw": _vpmovx(8, 16, True),
+    "vpmovsxbd": _vpmovx(8, 32, True),
+    "vpmovsxbq": _vpmovx(8, 64, True),
+    "vpmovsxwd": _vpmovx(16, 32, True),
+    "vpmovsxwq": _vpmovx(16, 64, True),
+    "vpmovsxdq": _vpmovx(32, 64, True),
+    "vpmovzxbw": _vpmovx(8, 16, False),
+    "vpmovzxbd": _vpmovx(8, 32, False),
+    "vpmovzxbq": _vpmovx(8, 64, False),
+    "vpmovzxwd": _vpmovx(16, 32, False),
+    "vpmovzxwq": _vpmovx(16, 64, False),
+    "vpmovzxdq": _vpmovx(32, 64, False),
+
+    # 128 bit lanes handling
+    "vextractf128": vextract128,
+    "vextracti128": vextract128,
+    "vinsertf128": vinsert128,
+    "vinserti128": vinsert128,
+    "vperm2f128": vperm2x128,
+    "vperm2i128": vperm2x128,
+
+    "vbroadcastss": _vbroadcast(32),
+    "vbroadcastsd": _vbroadcast(64),
+    "vbroadcastf128": _vbroadcast(128),
+    "vbroadcasti128": _vbroadcast(128),
+    "vpbroadcastb": _vbroadcast(8),
+    "vpbroadcastw": _vbroadcast(16),
+    "vpbroadcastd": _vbroadcast(32),
+    "vpbroadcastq": _vbroadcast(64),
+
+    # Permutations
+    "vpermilps": vpermilps,
+    "vpermilpd": vpermilpd,
+    "vpermq": vpermq,
+    "vpermpd": vpermq,
+    "vpermd": vpermd,
+    "vpermps": vpermd,
+
+    "vpsllvd": _vshift_var("<<", 32),
+    "vpsllvq": _vshift_var("<<", 64),
+    "vpsrlvd": _vshift_var(">>", 32),
+    "vpsrlvq": _vshift_var(">>", 64),
+    "vpsravd": _vshift_var("a>>", 32),
+
+    "vmaskmovps": _vmaskmov(32),
+    "vmaskmovpd": _vmaskmov(64),
+    "vpmaskmovd": _vmaskmov(32),
+    "vpmaskmovq": _vmaskmov(64),
+})
+
 
 
 class Lifter_X86_16(Lifter):

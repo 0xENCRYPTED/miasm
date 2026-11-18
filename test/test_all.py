@@ -59,6 +59,9 @@ testset += RegressionTest(["x86/arch.py"], base_dir="arch",
                                     "regression_test32_ia32.bin",
                                     "regression_test64_ia32.bin"])
 
+# SSE / AVX semantic, without jitter
+testset += RegressionTest(["x86/sem_sse_avx.py"], base_dir="arch")
+
 testset += RegressionTest(["arm/arch.py"], base_dir="arch")
 testset += RegressionTest(["aarch64/arch.py"], base_dir="arch")
 testset += RegressionTest(["sh4/arch.py"], base_dir="arch")

@@ -184,6 +184,7 @@ gpreg = (
     gpregs32.parser |
     gpregs64.parser |
     gpregs_xmm.parser |
+    gpregs_ymm.parser |
     gpregs_mm.parser |
     gpregs_bnd.parser
 )
@@ -226,9 +227,11 @@ DWORD = Literal('DWORD')
 QWORD = Literal('QWORD')
 TBYTE = Literal('TBYTE')
 XMMWORD = Literal('XMMWORD')
+YMMWORD = Literal('YMMWORD')
 
 MEMPREFIX2SIZE = {'BYTE': 8, 'WORD': 16, 'DWORD': 32,
-                  'QWORD': 64, 'TBYTE': 80, 'XMMWORD': 128}
+                  'QWORD': 64, 'TBYTE': 80, 'XMMWORD': 128,
+                  'YMMWORD': 256}
 
 SIZE2MEMPREFIX = dict((value, key) for key, value in viewitems(MEMPREFIX2SIZE))
 
@@ -242,7 +245,7 @@ def cb_deref_mem(tokens):
         return AstMem(AstOp('segm', segm, ptr), MEMPREFIX2SIZE[s])
     raise ValueError('len(tokens) > 3')
 
-mem_size = (BYTE | DWORD | QWORD | WORD | TBYTE | XMMWORD)
+mem_size = (BYTE | DWORD | QWORD | WORD | TBYTE | XMMWORD | YMMWORD)
 deref_mem = (mem_size + PTR + Optional((base_expr + COLON))+ deref_mem_ad).set_parse_action(cb_deref_mem)
 
 
@@ -254,6 +257,7 @@ rmarg = (
     gpregs64.parser |
     gpregs_mm.parser |
     gpregs_xmm.parser |
+    gpregs_ymm.parser |
     gpregs_bnd.parser
 )
 
@@ -462,6 +466,8 @@ class additional_info(object):
         self.v_opmode = None
         self.v_admode = None
         self.prefixed = b''
+        # True if the instruction is VEX encoded
+        self.vex = False
 
 
 class instruction_x86(instruction):
@@ -552,6 +558,7 @@ class instruction_x86(instruction):
         self.additional_info.v_admode = c.v_admode()
         self.additional_info.prefix = c.prefix
         self.additional_info.prefixed = getattr(c, "prefixed", b"")
+        self.additional_info.vex = hasattr(c, "vex")
 
     def __str__(self):
         return self.to_string()
@@ -721,6 +728,7 @@ class mn_x86(cls_mn):
         info.prefixed = b""
         if hasattr(self, 'prefixed'):
             info.prefixed = self.prefixed.default
+        info.vex = hasattr(self, 'vex')
         return info
 
     @classmethod
@@ -775,6 +783,7 @@ class mn_x86(cls_mn):
                         'rex_b': 0,
                         'prefix': b"",
                         'prefixed': b"",
+                        'vex': 0,
                         }
         while True:
             c = v.getbytes(offset)
@@ -807,7 +816,39 @@ class mn_x86(cls_mn):
             pre_dis_info['prefix'] += c
             offset += 1
         rex_prefixes = b'@ABCDEFGHIJKLMNO'
-        if mode == 64 and c in rex_prefixes:
+        if (c in (b'\xc4', b'\xc5') and
+            not pre_dis_info['opmode'] and
+            not pre_dis_info['g1'] and
+            cls.is_vex_prefix(v, mode, offset)):
+            # VEX prefix (legacy 66/F2/F3/LOCK/REX prefixes are forbidden)
+            b1 = ord(v.getbytes(offset + 1))
+            if c == b'\xc5':
+                # 2 bytes VEX: R vvvv L pp
+                vex_r, vex_x, vex_b = (b1 >> 7) & 1, 1, 1
+                vex_m, vex_w = 1, 0
+                b2 = b1
+                offset += 2
+            else:
+                # 3 bytes VEX: R X B mmmmm | W vvvv L pp
+                b2 = ord(v.getbytes(offset + 2))
+                vex_r, vex_x, vex_b = (b1 >> 7) & 1, (b1 >> 6) & 1, (b1 >> 5) & 1
+                vex_m, vex_w = b1 & 0x1f, (b2 >> 7) & 1
+                offset += 3
+            vex_v = (~(b2 >> 3)) & 0xf
+            if mode != 64:
+                # Only 8 registers are reachable outside the 64 bit mode
+                vex_b = 1
+                vex_v &= 7
+            pre_dis_info['vex'] = 1
+            pre_dis_info['vex_m'] = vex_m
+            pre_dis_info['vex_pp'] = b2 & 3
+            pre_dis_info['vex_l'] = (b2 >> 2) & 1
+            pre_dis_info['vex_v'] = vex_v
+            pre_dis_info['rex_w'] = vex_w
+            pre_dis_info['rex_r'] = vex_r ^ 1
+            pre_dis_info['rex_x'] = vex_x ^ 1
+            pre_dis_info['rex_b'] = vex_b ^ 1
+        elif mode == 64 and c in rex_prefixes:
             while c in rex_prefixes:
                 # multiple REX prefixes case - use last REX prefix
                 x = ord(c)
@@ -821,6 +862,22 @@ class mn_x86(cls_mn):
         elif pre_dis_info.get('g1', None) == 12 and c in [b'\xa6', b'\xa7', b'\xae', b'\xaf']:
             pre_dis_info['g1'] = 4
         return pre_dis_info, v, mode, offset, offset - offset_o
+
+    @staticmethod
+    def is_vex_prefix(v, mode, offset):
+        """Return True if the C4/C5 byte at @offset starts a VEX prefix.
+        Outside the 64 bit mode, C4/C5 are LES/LDS unless the two upper bits
+        of the next byte are set (which would be an invalid ModRM for them)"""
+        needed = 2 if v.getbytes(offset) == b'\xc5' else 3
+        try:
+            data = v.getbytes(offset + 1, needed)
+        except IOError:
+            return False
+        if len(data) != needed:
+            return False
+        if mode == 64:
+            return True
+        return ord(data[0:1]) & 0xc0 == 0xc0
 
     @classmethod
     def get_cls_instance(cls, cc, mode, infos=None):
@@ -861,10 +918,31 @@ class mn_x86(cls_mn):
             del(self.opmode)
         if hasattr(self, "admode"):
             del(self.admode)
+        self.vex_v = 0
 
     def add_pre_dis_info(self, pre_dis_info=None):
         if pre_dis_info is None:
             return True
+        is_vex = bool(pre_dis_info.get('vex', 0))
+        if is_vex != hasattr(self, "vex"):
+            # VEX encoded bytes only match VEX mnemonics, and vice versa
+            return False
+        if is_vex:
+            vex = self.vex
+            if (vex.vex_m != pre_dis_info['vex_m'] or
+                vex.vex_pp != pre_dis_info['vex_pp']):
+                return False
+            if vex.vex_l is not None and vex.vex_l != pre_dis_info['vex_l']:
+                return False
+            if vex.vex_w is not None and vex.vex_w != pre_dis_info['rex_w']:
+                # W is ignored outside the 64 bit mode when it only selects
+                # a general purpose register size
+                if not (vex.vex_wgpr and vex.vex_w == 0 and self.mode != 64):
+                    return False
+            self.vex_v = pre_dis_info['vex_v']
+            if not hasattr(self, "vex_v_arg") and self.vex_v != 0:
+                # VEX.vvvv must be 1111b when it does not encode an operand
+                return False
         if hasattr(self, "prefixed") and self.prefixed.default == b"\x66":
             pre_dis_info['opmode'] = 0
         self.opmode = pre_dis_info['opmode']
@@ -909,6 +987,9 @@ class mn_x86(cls_mn):
             self.g1.value = 0
         if self.g2.value is None:
             self.g2.value = 0
+
+        if hasattr(self, 'vex'):
+            return self.gen_vex_prefix()
 
         if self.rex_w.value:
             rex |= 0x8
@@ -955,6 +1036,51 @@ class mn_x86(cls_mn):
             v = b"\x66" + v
         return v
 
+    def gen_vex_prefix(self):
+        """Generate the prefixes of a VEX encoded instruction"""
+        vex = self.vex
+        if self.g1.value or (hasattr(self, "opmode") and self.opmode):
+            # LOCK/REP/66 are #UD with VEX
+            return None
+        if self.rex_p.value == 1:
+            # SPL/BPL/SIL/DIL like registers are not reachable
+            return None
+        vex_r = 0 if self.rex_r.value else 1
+        vex_x = 0 if self.rex_x.value else 1
+        vex_b = 0 if self.rex_b.value else 1
+        if self.mode != 64 and (vex_r, vex_x, vex_b) != (1, 1, 1):
+            return None
+        if vex.vex_w is not None:
+            if vex.vex_wgpr and vex.vex_w == 0 and self.rex_w.value:
+                # 64 bit operand given to the 32 bit form
+                return None
+            vex_w = vex.vex_w
+        elif self.mode != 64:
+            vex_w = 0
+        else:
+            vex_w = 1 if self.rex_w.value else 0
+        vex_l = vex.vex_l if vex.vex_l is not None else 0
+        vex_v = (~self.vex_v) & 0xf
+        low = (vex_v << 3) | (vex_l << 2) | vex.vex_pp
+        if vex_x == 1 and vex_b == 1 and vex_w == 0 and vex.vex_m == 1:
+            v = b"\xc5" + utils.int_to_byte((vex_r << 7) | low)
+        else:
+            v = b"\xc4" + utils.int_to_byte(
+                (vex_r << 7) | (vex_x << 6) | (vex_b << 5) | vex.vex_m
+            ) + utils.int_to_byte((vex_w << 7) | low)
+        if self.g2.value:
+            v = {
+                1: b'\x2e',
+                2: b'\x36',
+                3: b'\x3e',
+                4: b'\x26',
+                5: b'\x64',
+                6: b'\x65'
+            }[self.g2.value] + v
+        if hasattr(self, "admode") and self.admode:
+            v = b"\x67" + v
+        return v
+
     def encodefields(self, decoded):
         v = super(mn_x86, self).encodefields(decoded)
         prefix = self.gen_prefix()
@@ -976,6 +1102,8 @@ class mn_x86(cls_mn):
         cand_diff_mode = []
         out = []
         for c, v in candidates:
+            if hasattr(c, 'vex') and (c.g1.value or c.opmode):
+                continue
             if (hasattr(c, 'no_xmm_pref') and
                 (c.g1.value & 2 or c.g1.value & 4 or c.g1.value & 8 or c.opmode)):
                 continue
@@ -2277,6 +2405,8 @@ class x86_rm_sd(x86_rm_arg):
             return
         self.set_s_value(0)
         v_cand, segm, ok = expr2modrm(self.expr, p, 1)
+        if segm:
+            p.g2.value = segm2enc[segm]
         for x in self.gen_cand(v_cand, p.v_admode()):
             yield x
 
@@ -2294,6 +2424,8 @@ class x86_rm_wd(x86_rm_sd):
         p = self.parent
         p.wd.value = 0
         v_cand, segm, ok = expr2modrm(self.expr, p, 1)
+        if segm:
+            p.g2.value = segm2enc[segm]
         for x in self.gen_cand(v_cand, p.v_admode()):
             yield x
 
@@ -2316,6 +2448,8 @@ class x86_rm_08(x86_rm_arg):
             return
         p = self.parent
         v_cand, segm, ok = expr2modrm(self.expr, p, 0, 0, 0, 0)
+        if segm:
+            p.g2.value = segm2enc[segm]
         for x in self.gen_cand(v_cand, p.v_admode()):
             yield x
 
@@ -2340,6 +2474,8 @@ class x86_rm_reg_m08(x86_rm_arg):
         else:
             expr = self.expr
         v_cand, segm, ok = expr2modrm(expr, p, 1, 0, 0, 0)
+        if segm:
+            p.g2.value = segm2enc[segm]
         for x in self.gen_cand(v_cand, p.v_admode()):
             yield x
 
@@ -2363,6 +2499,8 @@ class x86_rm_m64(x86_rm_arg):
             return
         p = self.parent
         v_cand, segm, ok = expr2modrm(self.expr, p, 0, 0, 0, 1)
+        if segm:
+            p.g2.value = segm2enc[segm]
         for x in self.gen_cand(v_cand, p.v_admode()):
             yield x
 
@@ -2381,6 +2519,8 @@ class x86_rm_m80(x86_rm_m64):
             mode = 32
         self.expr = ExprMem(self.expr.ptr, mode)
         v_cand, segm, ok = expr2modrm(self.expr, p, 1)
+        if segm:
+            p.g2.value = segm2enc[segm]
         for x in self.gen_cand(v_cand, p.v_admode()):
             yield x
 
@@ -2400,6 +2540,8 @@ class x86_rm_m08(x86_rm_arg):
         p = self.parent
         mode = p.mode
         v_cand, segm, ok = expr2modrm(self.expr, p, 0)
+        if segm:
+            p.g2.value = segm2enc[segm]
         for x in self.gen_cand(v_cand, p.v_admode()):
             yield x
 
@@ -2445,6 +2587,8 @@ class x86_rm_mm(x86_rm_m80):
 
         v_cand, segm, ok = expr2modrm(expr, p, 0, 0, self.is_xmm, self.is_mm,
                                       self.is_bnd)
+        if segm:
+            p.g2.value = segm2enc[segm]
         for x in self.gen_cand(v_cand, p.v_admode()):
             yield x
 
@@ -4322,7 +4466,7 @@ addop("cvtps2pd", [bs8(0x0f), bs8(0x5a), no_xmm_pref]
 addop("cvtps2pi", [bs8(0x0f), bs8(0x2d), no_xmm_pref]
       + rmmod(mm_reg, rm_arg_xmm_m64))
 addop("cvtsd2si", [bs8(0x0f), bs8(0x2d), pref_f2]
-      + rmmod(reg, rm_arg_xmm_m64))
+      + rmmod(rmreg, rm_arg_xmm_m64))
 addop("cvtsd2ss", [bs8(0x0f), bs8(0x5a), pref_f2]
       + rmmod(xmm_reg, rm_arg_xmm_m64))
 addop("cvtsi2sd", [bs8(0x0f), bs8(0x2a), pref_f2]
@@ -4342,9 +4486,9 @@ addop("cvttps2dq",[bs8(0x0f), bs8(0x5b), pref_f3]
 addop("cvttps2pi",[bs8(0x0f), bs8(0x2c), no_xmm_pref]
       + rmmod(mm_reg, rm_arg_xmm_m64))
 addop("cvttsd2si",[bs8(0x0f), bs8(0x2c), pref_f2]
-      + rmmod(reg, rm_arg_xmm_m64))
+      + rmmod(rmreg, rm_arg_xmm_m64))
 addop("cvttss2si",[bs8(0x0f), bs8(0x2c), pref_f3]
-      + rmmod(reg, rm_arg_xmm_m32))
+      + rmmod(rmreg, rm_arg_xmm_m32))
 
 addop("blendps", [bs8(0x0f), bs8(0x3a), bs8(0x0c), pref_66] +
       rmmod(xmm_reg, rm_arg_xmm_m128) + [u08],
@@ -4777,6 +4921,687 @@ addop("setssbsy", [pref_f3, bs8(0x0f), bs8(0x01), bs8(0xe8)])
 addop("clrssbsy", [pref_f3, bs8(0x0f), bs8(0xae)] + rmmod(d6, rm_arg_xmm))
 addop("endbr64", [pref_f3, bs8(0x0f), bs8(0x1e), bs8(0xfa)])
 addop("endbr32", [pref_f3, bs8(0x0f), bs8(0x1e), bs8(0xfb)])
+
+###############################################################################
+# SSE / SSE2 / SSE3 / SSSE3 / SSE4.1 / SSE4.2 / AES / SHA: missing encodings
+###############################################################################
+
+# SSE
+addop("rcpps", [bs8(0x0f), bs8(0x53), no_xmm_pref] +
+      rmmod(xmm_reg, rm_arg_xmm_m128))
+addop("rcpss", [bs8(0x0f), bs8(0x53), pref_f3] +
+      rmmod(xmm_reg, rm_arg_xmm_m32))
+addop("rsqrtps", [bs8(0x0f), bs8(0x52), no_xmm_pref] +
+      rmmod(xmm_reg, rm_arg_xmm_m128))
+addop("rsqrtss", [bs8(0x0f), bs8(0x52), pref_f3] +
+      rmmod(xmm_reg, rm_arg_xmm_m32))
+
+addop("pshufw", [bs8(0x0f), bs8(0x70), no_xmm_pref] +
+      rmmod(mm_reg, rm_arg_mm_m64) + [u08])
+
+# Non temporal stores
+addop("movntps", [bs8(0x0f), bs8(0x2b), no_xmm_pref] +
+      rmmod(xmm_reg, rm_arg_xmm_m128, modrm=mod_mem),
+      [rm_arg_xmm_m128, xmm_reg])
+addop("movntpd", [bs8(0x0f), bs8(0x2b), pref_66] +
+      rmmod(xmm_reg, rm_arg_xmm_m128, modrm=mod_mem),
+      [rm_arg_xmm_m128, xmm_reg])
+addop("movntdq", [bs8(0x0f), bs8(0xe7), pref_66] +
+      rmmod(xmm_reg, rm_arg_xmm_m128, modrm=mod_mem),
+      [rm_arg_xmm_m128, xmm_reg])
+addop("movntq", [bs8(0x0f), bs8(0xe7), no_xmm_pref] +
+      rmmod(mm_reg, rm_arg_mm_m64, modrm=mod_mem),
+      [rm_arg_mm_m64, mm_reg])
+addop("movntdqa", [bs8(0x0f), bs8(0x38), bs8(0x2a), pref_66] +
+      rmmod(xmm_reg, rm_arg_xmm_m128, modrm=mod_mem))
+
+addop("clflush", [bs8(0x0f), bs8(0xae), no_xmm_pref] +
+      rmmod(d7, rm_arg_m08, modrm=mod_mem))
+addop("clflushopt", [bs8(0x0f), bs8(0xae), pref_66] +
+      rmmod(d7, rm_arg_m08, modrm=mod_mem))
+addop("mwait", [bs8(0x0f), bs8(0x01), bs8(0xc9)])
+
+# SSE3
+addop("lddqu", [bs8(0x0f), bs8(0xf0), pref_f2] +
+      rmmod(xmm_reg, rm_arg_xmm_m128, modrm=mod_mem))
+addop("movddup", [bs8(0x0f), bs8(0x12), pref_f2] +
+      rmmod(xmm_reg, rm_arg_xmm_m64))
+addop("movsldup", [bs8(0x0f), bs8(0x12), pref_f3] +
+      rmmod(xmm_reg, rm_arg_xmm_m128))
+addop("movshdup", [bs8(0x0f), bs8(0x16), pref_f3] +
+      rmmod(xmm_reg, rm_arg_xmm_m128))
+addop("addsubpd", [bs8(0x0f), bs8(0xd0), pref_66] +
+      rmmod(xmm_reg, rm_arg_xmm_m128))
+addop("addsubps", [bs8(0x0f), bs8(0xd0), pref_f2] +
+      rmmod(xmm_reg, rm_arg_xmm_m128))
+addop("haddpd", [bs8(0x0f), bs8(0x7c), pref_66] +
+      rmmod(xmm_reg, rm_arg_xmm_m128))
+addop("haddps", [bs8(0x0f), bs8(0x7c), pref_f2] +
+      rmmod(xmm_reg, rm_arg_xmm_m128))
+addop("hsubpd", [bs8(0x0f), bs8(0x7d), pref_66] +
+      rmmod(xmm_reg, rm_arg_xmm_m128))
+addop("hsubps", [bs8(0x0f), bs8(0x7d), pref_f2] +
+      rmmod(xmm_reg, rm_arg_xmm_m128))
+
+# SSSE3
+for _name, _opc in [
+        ("pabsb", 0x1c), ("pabsw", 0x1d), ("pabsd", 0x1e),
+        ("phaddw", 0x01), ("phaddd", 0x02), ("phaddsw", 0x03),
+        ("pmaddubsw", 0x04),
+        ("phsubw", 0x05), ("phsubd", 0x06), ("phsubsw", 0x07),
+        ("pmulhrsw", 0x0b),
+]:
+    addop(_name, [bs8(0x0f), bs8(0x38), bs8(_opc), no_xmm_pref] +
+          rmmod(mm_reg, rm_arg_mm_m64))
+    addop(_name, [bs8(0x0f), bs8(0x38), bs8(_opc), pref_66] +
+          rmmod(xmm_reg, rm_arg_xmm_m128))
+
+# SSE4.1
+addop("blendpd", [bs8(0x0f), bs8(0x3a), bs8(0x0d), pref_66] +
+      rmmod(xmm_reg, rm_arg_xmm_m128) + [u08])
+# The mask is the implicit XMM0 register
+addop("blendvps", [bs8(0x0f), bs8(0x38), bs8(0x14), pref_66] +
+      rmmod(xmm_reg, rm_arg_xmm_m128))
+addop("blendvpd", [bs8(0x0f), bs8(0x38), bs8(0x15), pref_66] +
+      rmmod(xmm_reg, rm_arg_xmm_m128))
+addop("pblendvb", [bs8(0x0f), bs8(0x38), bs8(0x10), pref_66] +
+      rmmod(xmm_reg, rm_arg_xmm_m128))
+addop("dpps", [bs8(0x0f), bs8(0x3a), bs8(0x40), pref_66] +
+      rmmod(xmm_reg, rm_arg_xmm_m128) + [u08])
+addop("dppd", [bs8(0x0f), bs8(0x3a), bs8(0x41), pref_66] +
+      rmmod(xmm_reg, rm_arg_xmm_m128) + [u08])
+addop("extractps", [bs8(0x0f), bs8(0x3a), bs8(0x17), pref_66] +
+      rmmod(xmm_reg, rm_arg) + [u08], [rm_arg, xmm_reg, u08])
+addop("insertps", [bs8(0x0f), bs8(0x3a), bs8(0x21), pref_66] +
+      rmmod(xmm_reg, rm_arg_xmm_m32) + [u08])
+addop("roundps", [bs8(0x0f), bs8(0x3a), bs8(0x08), pref_66] +
+      rmmod(xmm_reg, rm_arg_xmm_m128) + [u08])
+addop("roundpd", [bs8(0x0f), bs8(0x3a), bs8(0x09), pref_66] +
+      rmmod(xmm_reg, rm_arg_xmm_m128) + [u08])
+
+addop("pmovzxbw", [bs8(0x0f), bs8(0x38), bs8(0x30), pref_66] +
+      rmmod(xmm_reg, rm_arg_xmm_m64))
+addop("pmovzxbd", [bs8(0x0f), bs8(0x38), bs8(0x31), pref_66] +
+      rmmod(xmm_reg, rm_arg_xmm_m32))
+addop("pmovzxbq", [bs8(0x0f), bs8(0x38), bs8(0x32), pref_66] +
+      rmmod(xmm_reg, rm_arg_xmm_m16))
+addop("pmovzxwd", [bs8(0x0f), bs8(0x38), bs8(0x33), pref_66] +
+      rmmod(xmm_reg, rm_arg_xmm_m64))
+addop("pmovzxwq", [bs8(0x0f), bs8(0x38), bs8(0x34), pref_66] +
+      rmmod(xmm_reg, rm_arg_xmm_m32))
+addop("pmovzxdq", [bs8(0x0f), bs8(0x38), bs8(0x35), pref_66] +
+      rmmod(xmm_reg, rm_arg_xmm_m64))
+
+# SSE4.2
+addop("crc32", [bs8(0x0f), bs8(0x38), bs8(0xf0), pref_f2] +
+      rmmod(rmreg, rm_arg_08))
+addop("crc32", [bs8(0x0f), bs8(0x38), bs8(0xf1), pref_f2] +
+      rmmod(rmreg, rm_arg))
+addop("popcnt", [bs8(0x0f), bs8(0xb8), pref_f3] + rmmod(rmreg))
+
+addop("pcmpestrm", [bs8(0x0f), bs8(0x3a), bs8(0x60), pref_66] +
+      rmmod(xmm_reg, rm_arg_xmm_m128) + [u08])
+addop("pcmpestri", [bs8(0x0f), bs8(0x3a), bs8(0x61), pref_66] +
+      rmmod(xmm_reg, rm_arg_xmm_m128) + [u08])
+addop("pcmpistrm", [bs8(0x0f), bs8(0x3a), bs8(0x62), pref_66] +
+      rmmod(xmm_reg, rm_arg_xmm_m128) + [u08])
+addop("pcmpistri", [bs8(0x0f), bs8(0x3a), bs8(0x63), pref_66] +
+      rmmod(xmm_reg, rm_arg_xmm_m128) + [u08])
+
+# AES / SHA
+addop("aesimc", [bs8(0x0f), bs8(0x38), bs8(0xdb), pref_66] +
+      rmmod(xmm_reg, rm_arg_xmm_m128))
+addop("aeskeygenassist", [bs8(0x0f), bs8(0x3a), bs8(0xdf), pref_66] +
+      rmmod(xmm_reg, rm_arg_xmm_m128) + [u08])
+
+addop("sha1rnds4", [bs8(0x0f), bs8(0x3a), bs8(0xcc), no_xmm_pref] +
+      rmmod(xmm_reg, rm_arg_xmm_m128) + [u08])
+for _name, _opc in [
+        ("sha1nexte", 0xc8), ("sha1msg1", 0xc9), ("sha1msg2", 0xca),
+        ("sha256rnds2", 0xcb), ("sha256msg1", 0xcc), ("sha256msg2", 0xcd),
+]:
+    addop(_name, [bs8(0x0f), bs8(0x38), bs8(_opc), no_xmm_pref] +
+          rmmod(xmm_reg, rm_arg_xmm_m128))
+
+
+###############################################################################
+# AVX / AVX2 (VEX encoded instructions)
+###############################################################################
+
+class x86_rm_xmm_m08(x86_rm_mm):
+    msize = 8
+    is_mm = False
+    is_xmm = True
+
+
+class x86_rm_ymm(x86_rm_mm):
+    """ModRM r/m operand: YMM register or 256 bit memory"""
+    msize = 256
+    is_mm = False
+    is_xmm = True
+
+    def decode(self, v):
+        if not super(x86_rm_ymm, self).decode(v):
+            return False
+        if self.expr.is_id():
+            self.expr = gpregs_ymm.expr[gpregs_xmm.expr.index(self.expr)]
+        return True
+
+    def encode(self):
+        expr = self.expr
+        if expr.is_id():
+            if expr not in gpregs_ymm.expr:
+                return
+            expr = gpregs_xmm.expr[gpregs_ymm.expr.index(expr)]
+        elif expr.is_mem():
+            if expr.size != self.msize:
+                return
+            expr = ExprMem(expr.ptr, 128)
+        else:
+            return
+        p = self.parent
+        v_cand, segm, ok = expr2modrm(expr, p, 0, 0, 1, 0, 0)
+        if segm:
+            p.g2.value = segm2enc[segm]
+        for x in self.gen_cand(v_cand, p.v_admode()):
+            yield x
+
+
+class x86_rm_ymm_reg(x86_rm_ymm):
+    """ModRM r/m operand: YMM register only"""
+    msize = None
+
+
+class x86_rm_reg_ymm(x86_rm_reg_mm):
+    selreg = gpregs_ymm
+
+
+class x86_vex_v_xmm(x86_rm_reg_noarg, x86_arg):
+    """Register encoded in VEX.vvvv"""
+    selreg = gpregs_xmm
+
+    def decode(self, v):
+        self.expr = self.selreg.expr[self.parent.vex_v]
+        return True
+
+    def encode(self):
+        if not isinstance(self.expr, ExprId):
+            return False
+        if self.expr not in self.selreg.expr:
+            return False
+        index = self.selreg.expr.index(self.expr)
+        if index > 7 and self.parent.mode != 64:
+            return False
+        self.parent.vex_v = index
+        self.value = 0
+        return True
+
+
+class x86_vex_v_ymm(x86_vex_v_xmm):
+    selreg = gpregs_ymm
+
+
+class x86_vex_is4_xmm(x86_rm_reg_noarg, x86_arg):
+    """Register encoded in the upper nibble of the trailing imm8 (/is4)"""
+    selreg = gpregs_xmm
+
+    def decode(self, v):
+        v = (v >> 4) & 0xf
+        if self.parent.mode != 64:
+            v &= 7
+        self.expr = self.selreg.expr[v]
+        return True
+
+    def encode(self):
+        if not isinstance(self.expr, ExprId):
+            return False
+        if self.expr not in self.selreg.expr:
+            return False
+        index = self.selreg.expr.index(self.expr)
+        if index > 7 and self.parent.mode != 64:
+            return False
+        self.value = index << 4
+        return True
+
+
+class x86_vex_is4_ymm(x86_vex_is4_xmm):
+    selreg = gpregs_ymm
+
+
+ymm_reg = bs(l=3, cls=(x86_rm_reg_ymm, ), order=1, fname="reg")
+rm_arg_xmm_m08 = bs(l=0, cls=(x86_rm_xmm_m08,), fname='rmarg')
+rm_arg_ymm = bs(l=0, cls=(x86_rm_ymm,), fname='rmarg')
+rm_arg_ymm_reg = bs(l=0, cls=(x86_rm_ymm_reg,), fname='rmarg')
+vex_v_xmm = bs(l=0, cls=(x86_vex_v_xmm,), fname="vex_v_arg")
+vex_v_ymm = bs(l=0, cls=(x86_vex_v_ymm,), fname="vex_v_arg")
+vex_is4_xmm = bs(l=8, cls=(x86_vex_is4_xmm,), fname="is4")
+vex_is4_ymm = bs(l=8, cls=(x86_vex_is4_ymm,), fname="is4")
+
+# VEX.pp
+VEX_NP, VEX_66, VEX_F3, VEX_F2 = 0, 1, 2, 3
+# VEX.mmmmm
+VEX_0F, VEX_0F38, VEX_0F3A = 1, 2, 3
+
+
+def vex(pp, m, l=None, w=None, wgpr=False):
+    """VEX prefix description
+    @pp: implied legacy prefix (VEX_NP, VEX_66, VEX_F3, VEX_F2)
+    @m: opcode map (VEX_0F, VEX_0F38, VEX_0F3A)
+    @l: vector length bit, None if ignored (LIG)
+    @w: W bit, None if ignored (WIG)
+    @wgpr: W only selects a general purpose register size (as such, it is
+    ignored outside the 64 bit mode)
+    """
+    return bs(l=0, fname="vex", vex_pp=pp, vex_m=m, vex_l=l, vex_w=w,
+              vex_wgpr=wgpr)
+
+
+# Vector length -> (ModRM.reg, VEX.vvvv, ModRM.rm, is4) operands
+VEX_VEC = {
+    0: (xmm_reg, vex_v_xmm, rm_arg_xmm_m128, vex_is4_xmm),
+    1: (ymm_reg, vex_v_ymm, rm_arg_ymm, vex_is4_ymm),
+}
+
+
+def addop_vex(name, pp, m, opc, form, l=0, w=None, wgpr=False, reg=None,
+              v=None, rm=None, modrm=mod, imm=False, extra=None):
+    """Declare a VEX encoded mnemonic
+    @form: operand order, a string made of:
+        r: ModRM.reg, v: VEX.vvvv, m: ModRM.rm, i: imm8, 4: /is4 register
+    @l: VEX.L (0: 128 bits, 1: 256 bits, None: ignored)
+    @reg, @v, @rm: operand fields (default: vectors of the size given by @l)
+    @modrm: mod / mod_mem / mod_reg, to restrict the ModRM.rm kind
+    @extra: additional zero length fields
+    """
+    d_reg, d_v, d_rm, d_is4 = VEX_VEC[l or 0]
+    reg = d_reg if reg is None else reg
+    v = d_v if v is None else v
+    rm = d_rm if rm is None else rm
+    fields = [vex(pp, m, l, w, wgpr)]
+    if extra:
+        fields += extra
+    if 'v' in form:
+        fields.append(v)
+    fields += [bs8(opc)] + rmmod(reg, rm, modrm)
+    if 'i' in form:
+        fields.append(u08)
+    if '4' in form:
+        fields.append(d_is4)
+    operands = {'r': reg, 'v': v, 'm': rm, 'i': u08, '4': d_is4}
+    addop(name, fields, [operands[char] for char in form])
+
+
+def addop_vex_lr(name, pp, m, opc, form, **kwargs):
+    """Declare both 128 and 256 bit versions of a VEX encoded mnemonic"""
+    addop_vex(name, pp, m, opc, form, l=0, **kwargs)
+    addop_vex(name, pp, m, opc, form, l=1, **kwargs)
+
+
+## Packed float: op xmm1, xmm2, xmm3/m128 | op ymm1, ymm2, ymm3/m256
+for _name, _opc in [
+        ("add", 0x58), ("mul", 0x59), ("sub", 0x5c), ("min", 0x5d),
+        ("div", 0x5e), ("max", 0x5f), ("and", 0x54), ("andn", 0x55),
+        ("or", 0x56), ("xor", 0x57), ("unpckl", 0x14), ("unpckh", 0x15),
+]:
+    addop_vex_lr("v%sps" % _name, VEX_NP, VEX_0F, _opc, "rvm")
+    addop_vex_lr("v%spd" % _name, VEX_66, VEX_0F, _opc, "rvm")
+
+for _name, _pp, _opc in [
+        ("vhaddpd", VEX_66, 0x7c), ("vhaddps", VEX_F2, 0x7c),
+        ("vhsubpd", VEX_66, 0x7d), ("vhsubps", VEX_F2, 0x7d),
+        ("vaddsubpd", VEX_66, 0xd0), ("vaddsubps", VEX_F2, 0xd0),
+]:
+    addop_vex_lr(_name, _pp, VEX_0F, _opc, "rvm")
+
+addop_vex_lr("vshufps", VEX_NP, VEX_0F, 0xc6, "rvmi")
+addop_vex_lr("vshufpd", VEX_66, VEX_0F, 0xc6, "rvmi")
+addop_vex_lr("vcmpps", VEX_NP, VEX_0F, 0xc2, "rvmi")
+addop_vex_lr("vcmppd", VEX_66, VEX_0F, 0xc2, "rvmi")
+addop_vex_lr("vblendps", VEX_66, VEX_0F3A, 0x0c, "rvmi")
+addop_vex_lr("vblendpd", VEX_66, VEX_0F3A, 0x0d, "rvmi")
+addop_vex_lr("vdpps", VEX_66, VEX_0F3A, 0x40, "rvmi")
+addop_vex("vdppd", VEX_66, VEX_0F3A, 0x41, "rvmi")
+
+## Scalar float: op xmm1, xmm2, xmm3/m32|m64
+for _name, _opc in [
+        ("add", 0x58), ("mul", 0x59), ("sub", 0x5c), ("min", 0x5d),
+        ("div", 0x5e), ("max", 0x5f), ("sqrt", 0x51),
+]:
+    addop_vex("v%sss" % _name, VEX_F3, VEX_0F, _opc, "rvm", l=None,
+              rm=rm_arg_xmm_m32)
+    addop_vex("v%ssd" % _name, VEX_F2, VEX_0F, _opc, "rvm", l=None,
+              rm=rm_arg_xmm_m64)
+addop_vex("vrsqrtss", VEX_F3, VEX_0F, 0x52, "rvm", l=None, rm=rm_arg_xmm_m32)
+addop_vex("vrcpss", VEX_F3, VEX_0F, 0x53, "rvm", l=None, rm=rm_arg_xmm_m32)
+addop_vex("vcmpss", VEX_F3, VEX_0F, 0xc2, "rvmi", l=None, rm=rm_arg_xmm_m32)
+addop_vex("vcmpsd", VEX_F2, VEX_0F, 0xc2, "rvmi", l=None, rm=rm_arg_xmm_m64)
+addop_vex("vcvtss2sd", VEX_F3, VEX_0F, 0x5a, "rvm", l=None, rm=rm_arg_xmm_m32)
+addop_vex("vcvtsd2ss", VEX_F2, VEX_0F, 0x5a, "rvm", l=None, rm=rm_arg_xmm_m64)
+addop_vex("vroundss", VEX_66, VEX_0F3A, 0x0a, "rvmi", l=None,
+          rm=rm_arg_xmm_m32)
+addop_vex("vroundsd", VEX_66, VEX_0F3A, 0x0b, "rvmi", l=None,
+          rm=rm_arg_xmm_m64)
+for _name, _pp, _opc, _rm in [
+        ("vcomiss", VEX_NP, 0x2f, rm_arg_xmm_m32),
+        ("vcomisd", VEX_66, 0x2f, rm_arg_xmm_m64),
+        ("vucomiss", VEX_NP, 0x2e, rm_arg_xmm_m32),
+        ("vucomisd", VEX_66, 0x2e, rm_arg_xmm_m64),
+]:
+    addop_vex(_name, _pp, VEX_0F, _opc, "rm", l=None, rm=_rm)
+
+## Packed, one source: op xmm1, xmm2/m128 | op ymm1, ymm2/m256
+for _name, _pp, _m, _opc in [
+        ("vsqrtps", VEX_NP, VEX_0F, 0x51), ("vsqrtpd", VEX_66, VEX_0F, 0x51),
+        ("vrsqrtps", VEX_NP, VEX_0F, 0x52), ("vrcpps", VEX_NP, VEX_0F, 0x53),
+        ("vcvtdq2ps", VEX_NP, VEX_0F, 0x5b),
+        ("vcvtps2dq", VEX_66, VEX_0F, 0x5b),
+        ("vcvttps2dq", VEX_F3, VEX_0F, 0x5b),
+        ("vmovshdup", VEX_F3, VEX_0F, 0x16),
+        ("vmovsldup", VEX_F3, VEX_0F, 0x12),
+        ("vpabsb", VEX_66, VEX_0F38, 0x1c),
+        ("vpabsw", VEX_66, VEX_0F38, 0x1d),
+        ("vpabsd", VEX_66, VEX_0F38, 0x1e),
+        ("vptest", VEX_66, VEX_0F38, 0x17),
+]:
+    addop_vex_lr(_name, _pp, _m, _opc, "rm")
+addop_vex_lr("vtestps", VEX_66, VEX_0F38, 0x0e, "rm", w=0)
+addop_vex_lr("vtestpd", VEX_66, VEX_0F38, 0x0f, "rm", w=0)
+
+addop_vex_lr("vroundps", VEX_66, VEX_0F3A, 0x08, "rmi")
+addop_vex_lr("vroundpd", VEX_66, VEX_0F3A, 0x09, "rmi")
+addop_vex_lr("vpermilps", VEX_66, VEX_0F3A, 0x04, "rmi", w=0)
+addop_vex_lr("vpermilpd", VEX_66, VEX_0F3A, 0x05, "rmi", w=0)
+addop_vex_lr("vpermilps", VEX_66, VEX_0F38, 0x0c, "rvm", w=0)
+addop_vex_lr("vpermilpd", VEX_66, VEX_0F38, 0x0d, "rvm", w=0)
+addop_vex_lr("vpshufd", VEX_66, VEX_0F, 0x70, "rmi")
+addop_vex_lr("vpshufhw", VEX_F3, VEX_0F, 0x70, "rmi")
+addop_vex_lr("vpshuflw", VEX_F2, VEX_0F, 0x70, "rmi")
+
+addop_vex("vmovddup", VEX_F2, VEX_0F, 0x12, "rm", l=0, rm=rm_arg_xmm_m64)
+addop_vex("vmovddup", VEX_F2, VEX_0F, 0x12, "rm", l=1)
+
+# 128 bit only
+addop_vex("vphminposuw", VEX_66, VEX_0F38, 0x41, "rm")
+addop_vex("vaesimc", VEX_66, VEX_0F38, 0xdb, "rm")
+addop_vex("vaeskeygenassist", VEX_66, VEX_0F3A, 0xdf, "rmi")
+addop_vex("vpcmpestrm", VEX_66, VEX_0F3A, 0x60, "rmi")
+addop_vex("vpcmpestri", VEX_66, VEX_0F3A, 0x61, "rmi")
+addop_vex("vpcmpistrm", VEX_66, VEX_0F3A, 0x62, "rmi")
+addop_vex("vpcmpistri", VEX_66, VEX_0F3A, 0x63, "rmi")
+
+## Moves
+for _name, _pp, _opc in [
+        ("vmovups", VEX_NP, 0x10), ("vmovupd", VEX_66, 0x10),
+        ("vmovaps", VEX_NP, 0x28), ("vmovapd", VEX_66, 0x28),
+]:
+    addop_vex_lr(_name, _pp, VEX_0F, _opc, "rm")
+    addop_vex_lr(_name, _pp, VEX_0F, _opc + 1, "mr")
+addop_vex_lr("vmovdqa", VEX_66, VEX_0F, 0x6f, "rm")
+addop_vex_lr("vmovdqa", VEX_66, VEX_0F, 0x7f, "mr")
+addop_vex_lr("vmovdqu", VEX_F3, VEX_0F, 0x6f, "rm")
+addop_vex_lr("vmovdqu", VEX_F3, VEX_0F, 0x7f, "mr")
+
+addop_vex_lr("vlddqu", VEX_F2, VEX_0F, 0xf0, "rm", modrm=mod_mem)
+addop_vex_lr("vmovntdqa", VEX_66, VEX_0F38, 0x2a, "rm", modrm=mod_mem)
+addop_vex_lr("vmovntps", VEX_NP, VEX_0F, 0x2b, "mr", modrm=mod_mem)
+addop_vex_lr("vmovntpd", VEX_66, VEX_0F, 0x2b, "mr", modrm=mod_mem)
+addop_vex_lr("vmovntdq", VEX_66, VEX_0F, 0xe7, "mr", modrm=mod_mem)
+
+for _name, _pp, _rm in [
+        ("vmovss", VEX_F3, rm_arg_xmm_m32),
+        ("vmovsd", VEX_F2, rm_arg_xmm_m64),
+]:
+    # vmovss xmm1, m32
+    addop_vex(_name, _pp, VEX_0F, 0x10, "rm", l=None, rm=_rm, modrm=mod_mem)
+    # vmovss xmm1, xmm2, xmm3
+    addop_vex(_name, _pp, VEX_0F, 0x10, "rvm", l=None, rm=rm_arg_xmm_reg,
+              modrm=mod_reg)
+    # vmovss m32, xmm1
+    addop_vex(_name, _pp, VEX_0F, 0x11, "mr", l=None, rm=_rm, modrm=mod_mem)
+    # vmovss xmm1, xmm2, xmm3 (alternative encoding)
+    addop_vex(_name, _pp, VEX_0F, 0x11, "mvr", l=None, rm=rm_arg_xmm_reg,
+              modrm=mod_reg)
+
+for _name, _pp, _opc in [
+        ("vmovlps", VEX_NP, 0x12), ("vmovlpd", VEX_66, 0x12),
+        ("vmovhps", VEX_NP, 0x16), ("vmovhpd", VEX_66, 0x16),
+]:
+    # vmovlps xmm1, xmm2, m64
+    addop_vex(_name, _pp, VEX_0F, _opc, "rvm", rm=rm_arg_xmm_m64,
+              modrm=mod_mem)
+    # vmovlps m64, xmm1
+    addop_vex(_name, _pp, VEX_0F, _opc + 1, "mr", rm=rm_arg_xmm_m64,
+              modrm=mod_mem)
+addop_vex("vmovhlps", VEX_NP, VEX_0F, 0x12, "rvm", rm=rm_arg_xmm_reg,
+          modrm=mod_reg)
+addop_vex("vmovlhps", VEX_NP, VEX_0F, 0x16, "rvm", rm=rm_arg_xmm_reg,
+          modrm=mod_reg)
+
+addop_vex("vmovd", VEX_66, VEX_0F, 0x6e, "rm", w=0, wgpr=True, rm=rm_arg,
+          extra=[bs_opmode32])
+addop_vex("vmovd", VEX_66, VEX_0F, 0x7e, "mr", w=0, wgpr=True, rm=rm_arg,
+          extra=[bs_opmode32])
+addop_vex("vmovq", VEX_66, VEX_0F, 0x6e, "rm", w=1, rm=rm_arg,
+          extra=[bs_opmode64])
+addop_vex("vmovq", VEX_66, VEX_0F, 0x7e, "mr", w=1, rm=rm_arg,
+          extra=[bs_opmode64])
+addop_vex("vmovq", VEX_F3, VEX_0F, 0x7e, "rm", rm=rm_arg_xmm_m64)
+addop_vex("vmovq", VEX_66, VEX_0F, 0xd6, "mr", rm=rm_arg_xmm_m64)
+
+addop_vex("vmovmskps", VEX_NP, VEX_0F, 0x50, "rm", l=0, reg=reg_modrm,
+          rm=rm_arg_xmm_reg)
+addop_vex("vmovmskps", VEX_NP, VEX_0F, 0x50, "rm", l=1, reg=reg_modrm,
+          rm=rm_arg_ymm_reg)
+addop_vex("vmovmskpd", VEX_66, VEX_0F, 0x50, "rm", l=0, reg=reg_modrm,
+          rm=rm_arg_xmm_reg)
+addop_vex("vmovmskpd", VEX_66, VEX_0F, 0x50, "rm", l=1, reg=reg_modrm,
+          rm=rm_arg_ymm_reg)
+addop_vex("vpmovmskb", VEX_66, VEX_0F, 0xd7, "rm", l=0, reg=reg_modrm,
+          rm=rm_arg_xmm_reg)
+addop_vex("vpmovmskb", VEX_66, VEX_0F, 0xd7, "rm", l=1, reg=reg_modrm,
+          rm=rm_arg_ymm_reg)
+addop_vex("vmaskmovdqu", VEX_66, VEX_0F, 0xf7, "rm", rm=rm_arg_xmm_reg)
+
+addop_vex("vldmxcsr", VEX_NP, VEX_0F, 0xae, "m", l=0, reg=d2, rm=rm_arg,
+          modrm=mod_mem)
+addop_vex("vstmxcsr", VEX_NP, VEX_0F, 0xae, "m", l=0, reg=d3, rm=rm_arg,
+          modrm=mod_mem)
+addop("vzeroupper", [vex(VEX_NP, VEX_0F, 0), bs8(0x77)])
+addop("vzeroall", [vex(VEX_NP, VEX_0F, 1), bs8(0x77)])
+
+## Conversions
+for _name, _pp, _opc in [
+        ("vcvtsi2ss", VEX_F3, 0x2a), ("vcvtsi2sd", VEX_F2, 0x2a),
+]:
+    addop_vex(_name, _pp, VEX_0F, _opc, "rvm", l=None, w=0, wgpr=True,
+              rm=rm_arg, extra=[bs_opmode32])
+    addop_vex(_name, _pp, VEX_0F, _opc, "rvm", l=None, w=1,
+              rm=rm_arg, extra=[bs_opmode64])
+for _name, _pp, _opc, _rm in [
+        ("vcvtss2si", VEX_F3, 0x2d, rm_arg_xmm_m32),
+        ("vcvtsd2si", VEX_F2, 0x2d, rm_arg_xmm_m64),
+        ("vcvttss2si", VEX_F3, 0x2c, rm_arg_xmm_m32),
+        ("vcvttsd2si", VEX_F2, 0x2c, rm_arg_xmm_m64),
+]:
+    addop_vex(_name, _pp, VEX_0F, _opc, "rm", l=None, w=0, wgpr=True,
+              reg=rmreg, rm=_rm, extra=[bs_opmode32])
+    addop_vex(_name, _pp, VEX_0F, _opc, "rm", l=None, w=1,
+              reg=rmreg, rm=_rm, extra=[bs_opmode64])
+
+# xmm1, xmm2/m64 | ymm1, xmm2/m128
+addop_vex("vcvtdq2pd", VEX_F3, VEX_0F, 0xe6, "rm", l=0, rm=rm_arg_xmm_m64)
+addop_vex("vcvtdq2pd", VEX_F3, VEX_0F, 0xe6, "rm", l=1, rm=rm_arg_xmm_m128)
+addop_vex("vcvtps2pd", VEX_NP, VEX_0F, 0x5a, "rm", l=0, rm=rm_arg_xmm_m64)
+addop_vex("vcvtps2pd", VEX_NP, VEX_0F, 0x5a, "rm", l=1, rm=rm_arg_xmm_m128)
+# xmm1, xmm2/m128 | xmm1, ymm2/m256
+for _name, _pp, _opc in [
+        ("vcvtpd2ps", VEX_66, 0x5a),
+        ("vcvtpd2dq", VEX_F2, 0xe6),
+        ("vcvttpd2dq", VEX_66, 0xe6),
+]:
+    addop_vex(_name, _pp, VEX_0F, _opc, "rm", l=0)
+    addop_vex(_name, _pp, VEX_0F, _opc, "rm", l=1, reg=xmm_reg)
+
+# Sign / zero extensions
+for _suffix, _opc, _rm128, _rm256 in [
+        ("bw", 0x0, rm_arg_xmm_m64, rm_arg_xmm_m128),
+        ("bd", 0x1, rm_arg_xmm_m32, rm_arg_xmm_m64),
+        ("bq", 0x2, rm_arg_xmm_m16, rm_arg_xmm_m32),
+        ("wd", 0x3, rm_arg_xmm_m64, rm_arg_xmm_m128),
+        ("wq", 0x4, rm_arg_xmm_m32, rm_arg_xmm_m64),
+        ("dq", 0x5, rm_arg_xmm_m64, rm_arg_xmm_m128),
+]:
+    for _kind, _base in [("s", 0x20), ("z", 0x30)]:
+        _name = "vpmov%sx%s" % (_kind, _suffix)
+        addop_vex(_name, VEX_66, VEX_0F38, _base + _opc, "rm", l=0, rm=_rm128)
+        addop_vex(_name, VEX_66, VEX_0F38, _base + _opc, "rm", l=1, rm=_rm256)
+
+## Packed integer: op xmm1, xmm2, xmm3/m128 | op ymm1, ymm2, ymm3/m256
+for _name, _opc in [
+        ("punpcklbw", 0x60), ("punpcklwd", 0x61), ("punpckldq", 0x62),
+        ("packsswb", 0x63), ("pcmpgtb", 0x64), ("pcmpgtw", 0x65),
+        ("pcmpgtd", 0x66), ("packuswb", 0x67), ("punpckhbw", 0x68),
+        ("punpckhwd", 0x69), ("punpckhdq", 0x6a), ("packssdw", 0x6b),
+        ("punpcklqdq", 0x6c), ("punpckhqdq", 0x6d),
+        ("pcmpeqb", 0x74), ("pcmpeqw", 0x75), ("pcmpeqd", 0x76),
+        ("paddq", 0xd4), ("pmullw", 0xd5),
+        ("psubusb", 0xd8), ("psubusw", 0xd9), ("pminub", 0xda),
+        ("pand", 0xdb), ("paddusb", 0xdc), ("paddusw", 0xdd),
+        ("pmaxub", 0xde), ("pandn", 0xdf), ("pavgb", 0xe0),
+        ("pavgw", 0xe3), ("pmulhuw", 0xe4), ("pmulhw", 0xe5),
+        ("psubsb", 0xe8), ("psubsw", 0xe9), ("pminsw", 0xea),
+        ("por", 0xeb), ("paddsb", 0xec), ("paddsw", 0xed),
+        ("pmaxsw", 0xee), ("pxor", 0xef),
+        ("pmuludq", 0xf4), ("pmaddwd", 0xf5), ("psadbw", 0xf6),
+        ("psubb", 0xf8), ("psubw", 0xf9), ("psubd", 0xfa), ("psubq", 0xfb),
+        ("paddb", 0xfc), ("paddw", 0xfd), ("paddd", 0xfe),
+]:
+    addop_vex_lr("v" + _name, VEX_66, VEX_0F, _opc, "rvm")
+
+for _name, _opc in [
+        ("pshufb", 0x00), ("phaddw", 0x01), ("phaddd", 0x02),
+        ("phaddsw", 0x03), ("pmaddubsw", 0x04), ("phsubw", 0x05),
+        ("phsubd", 0x06), ("phsubsw", 0x07), ("psignb", 0x08),
+        ("psignw", 0x09), ("psignd", 0x0a), ("pmulhrsw", 0x0b),
+        ("pmuldq", 0x28), ("pcmpeqq", 0x29), ("packusdw", 0x2b),
+        ("pcmpgtq", 0x37), ("pminsb", 0x38), ("pminsd", 0x39),
+        ("pminuw", 0x3a), ("pminud", 0x3b), ("pmaxsb", 0x3c),
+        ("pmaxsd", 0x3d), ("pmaxuw", 0x3e), ("pmaxud", 0x3f),
+        ("pmulld", 0x40),
+]:
+    addop_vex_lr("v" + _name, VEX_66, VEX_0F38, _opc, "rvm")
+
+addop_vex_lr("vpalignr", VEX_66, VEX_0F3A, 0x0f, "rvmi")
+addop_vex_lr("vpblendw", VEX_66, VEX_0F3A, 0x0e, "rvmi")
+addop_vex_lr("vmpsadbw", VEX_66, VEX_0F3A, 0x42, "rvmi")
+addop_vex_lr("vpblendd", VEX_66, VEX_0F3A, 0x02, "rvmi", w=0)
+addop_vex("vpclmulqdq", VEX_66, VEX_0F3A, 0x44, "rvmi")
+for _name, _opc in [
+        ("vaesenc", 0xdc), ("vaesenclast", 0xdd),
+        ("vaesdec", 0xde), ("vaesdeclast", 0xdf),
+]:
+    addop_vex(_name, VEX_66, VEX_0F38, _opc, "rvm")
+
+# Variable blend: op xmm1, xmm2, xmm3/m128, xmm4
+addop_vex_lr("vblendvps", VEX_66, VEX_0F3A, 0x4a, "rvm4", w=0)
+addop_vex_lr("vblendvpd", VEX_66, VEX_0F3A, 0x4b, "rvm4", w=0)
+addop_vex_lr("vpblendvb", VEX_66, VEX_0F3A, 0x4c, "rvm4", w=0)
+
+# Shifts, count in xmm/m128: op xmm1, xmm2, xmm3/m128 | op ymm1, ymm2, xmm3/m128
+for _name, _opc in [
+        ("vpsrlw", 0xd1), ("vpsrld", 0xd2), ("vpsrlq", 0xd3),
+        ("vpsraw", 0xe1), ("vpsrad", 0xe2),
+        ("vpsllw", 0xf1), ("vpslld", 0xf2), ("vpsllq", 0xf3),
+]:
+    addop_vex(_name, VEX_66, VEX_0F, _opc, "rvm", l=0)
+    addop_vex(_name, VEX_66, VEX_0F, _opc, "rvm", l=1, rm=rm_arg_xmm_m128)
+
+# Shifts, immediate count: op xmm1, xmm2, imm8 | op ymm1, ymm2, imm8
+for _name, _opc, _digit in [
+        ("vpsrlw", 0x71, d2), ("vpsraw", 0x71, d4), ("vpsllw", 0x71, d6),
+        ("vpsrld", 0x72, d2), ("vpsrad", 0x72, d4), ("vpslld", 0x72, d6),
+        ("vpsrlq", 0x73, d2), ("vpsrldq", 0x73, d3),
+        ("vpsllq", 0x73, d6), ("vpslldq", 0x73, d7),
+]:
+    addop_vex(_name, VEX_66, VEX_0F, _opc, "vmi", l=0, reg=_digit,
+              rm=rm_arg_xmm_reg, modrm=mod_reg)
+    addop_vex(_name, VEX_66, VEX_0F, _opc, "vmi", l=1, reg=_digit,
+              rm=rm_arg_ymm_reg, modrm=mod_reg)
+
+# Per element variable shifts (AVX2)
+addop_vex_lr("vpsrlvd", VEX_66, VEX_0F38, 0x45, "rvm", w=0)
+addop_vex_lr("vpsrlvq", VEX_66, VEX_0F38, 0x45, "rvm", w=1)
+addop_vex_lr("vpsravd", VEX_66, VEX_0F38, 0x46, "rvm", w=0)
+addop_vex_lr("vpsllvd", VEX_66, VEX_0F38, 0x47, "rvm", w=0)
+addop_vex_lr("vpsllvq", VEX_66, VEX_0F38, 0x47, "rvm", w=1)
+
+## Insert / extract
+addop_vex("vpextrb", VEX_66, VEX_0F3A, 0x14, "mri", rm=rm_arg_reg_m08)
+addop_vex("vpextrw", VEX_66, VEX_0F3A, 0x15, "mri", rm=rm_arg_reg_m16)
+addop_vex("vpextrw", VEX_66, VEX_0F, 0xc5, "rmi", reg=reg_modrm,
+          rm=rm_arg_xmm_reg, modrm=mod_reg)
+addop_vex("vpextrd", VEX_66, VEX_0F3A, 0x16, "mri", w=0, wgpr=True,
+          rm=rm_arg, extra=[bs_opmode32])
+addop_vex("vpextrq", VEX_66, VEX_0F3A, 0x16, "mri", w=1, rm=rm_arg,
+          extra=[bs_opmode64])
+addop_vex("vextractps", VEX_66, VEX_0F3A, 0x17, "mri", rm=rm_arg)
+addop_vex("vpinsrb", VEX_66, VEX_0F3A, 0x20, "rvmi", rm=rm_arg_reg_m08)
+addop_vex("vpinsrw", VEX_66, VEX_0F, 0xc4, "rvmi", rm=rm_arg_reg_m16)
+addop_vex("vpinsrd", VEX_66, VEX_0F3A, 0x22, "rvmi", w=0, wgpr=True,
+          rm=rm_arg, extra=[bs_opmode32])
+addop_vex("vpinsrq", VEX_66, VEX_0F3A, 0x22, "rvmi", w=1, rm=rm_arg,
+          extra=[bs_opmode64])
+addop_vex("vinsertps", VEX_66, VEX_0F3A, 0x21, "rvmi", rm=rm_arg_xmm_m32)
+
+# 128 bit lanes
+addop_vex("vextractf128", VEX_66, VEX_0F3A, 0x19, "mri", l=1, w=0,
+          rm=rm_arg_xmm_m128)
+addop_vex("vextracti128", VEX_66, VEX_0F3A, 0x39, "mri", l=1, w=0,
+          rm=rm_arg_xmm_m128)
+addop_vex("vinsertf128", VEX_66, VEX_0F3A, 0x18, "rvmi", l=1, w=0,
+          rm=rm_arg_xmm_m128)
+addop_vex("vinserti128", VEX_66, VEX_0F3A, 0x38, "rvmi", l=1, w=0,
+          rm=rm_arg_xmm_m128)
+addop_vex("vperm2f128", VEX_66, VEX_0F3A, 0x06, "rvmi", l=1, w=0)
+addop_vex("vperm2i128", VEX_66, VEX_0F3A, 0x46, "rvmi", l=1, w=0)
+
+## Broadcasts
+addop_vex("vbroadcastss", VEX_66, VEX_0F38, 0x18, "rm", l=0, w=0,
+          rm=rm_arg_xmm_m32)
+addop_vex("vbroadcastss", VEX_66, VEX_0F38, 0x18, "rm", l=1, w=0,
+          rm=rm_arg_xmm_m32)
+addop_vex("vbroadcastsd", VEX_66, VEX_0F38, 0x19, "rm", l=1, w=0,
+          rm=rm_arg_xmm_m64)
+addop_vex("vbroadcastf128", VEX_66, VEX_0F38, 0x1a, "rm", l=1, w=0,
+          rm=rm_arg_xmm_m128, modrm=mod_mem)
+addop_vex("vbroadcasti128", VEX_66, VEX_0F38, 0x5a, "rm", l=1, w=0,
+          rm=rm_arg_xmm_m128, modrm=mod_mem)
+for _name, _opc, _rm in [
+        ("vpbroadcastb", 0x78, rm_arg_xmm_m08),
+        ("vpbroadcastw", 0x79, rm_arg_xmm_m16),
+        ("vpbroadcastd", 0x58, rm_arg_xmm_m32),
+        ("vpbroadcastq", 0x59, rm_arg_xmm_m64),
+]:
+    addop_vex(_name, VEX_66, VEX_0F38, _opc, "rm", l=0, w=0, rm=_rm)
+    addop_vex(_name, VEX_66, VEX_0F38, _opc, "rm", l=1, w=0, rm=_rm)
+
+## Permutations (AVX2)
+addop_vex("vpermq", VEX_66, VEX_0F3A, 0x00, "rmi", l=1, w=1)
+addop_vex("vpermpd", VEX_66, VEX_0F3A, 0x01, "rmi", l=1, w=1)
+addop_vex("vpermd", VEX_66, VEX_0F38, 0x36, "rvm", l=1, w=0)
+addop_vex("vpermps", VEX_66, VEX_0F38, 0x16, "rvm", l=1, w=0)
+
+## Conditional moves
+for _name, _opc, _w in [
+        ("vmaskmovps", 0x2c, 0), ("vmaskmovpd", 0x2d, 0),
+        ("vpmaskmovd", 0x8c, 0), ("vpmaskmovq", 0x8c, 1),
+]:
+    # op xmm1, xmm2, m128
+    addop_vex_lr(_name, VEX_66, VEX_0F38, _opc, "rvm", w=_w, modrm=mod_mem)
+    # op m128, xmm1, xmm2
+    addop_vex_lr(_name, VEX_66, VEX_0F38, _opc + 2, "mvr", w=_w,
+                 modrm=mod_mem)
+
 
 mn_x86.bintree = factor_one_bit(mn_x86.bintree)
 # mn_x86.bintree = factor_fields_all(mn_x86.bintree)
