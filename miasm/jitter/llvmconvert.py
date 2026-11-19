@@ -953,6 +953,41 @@ class LLVMFunction(object):
                 arg_b = self.add_ir(expr.args[1])
                 arg_a = self.add_ir(expr.args[0])
 
+                if expr.size > 64:
+                    # DIV / IDIV on a 64 bit operand divide a 128 bit value.
+                    # LLVM lowers a division on more than 64 bits to a call
+                    # to the compiler runtime (__udivti3, ...), which the JIT
+                    # cannot resolve: the generated code crashes. The division
+                    # is expanded here (restoring division, one step per bit)
+                    itype = LLVMType.IntType(expr.size)
+                    zero, one = itype(0), itype(1)
+                    signed = op in ("smod", "sdiv")
+                    num, den = arg_a, arg_b
+                    if signed:
+                        neg_a = builder.icmp_signed("<", arg_a, zero)
+                        neg_b = builder.icmp_signed("<", arg_b, zero)
+                        num = builder.select(neg_a, builder.sub(zero, arg_a),
+                                             arg_a)
+                        den = builder.select(neg_b, builder.sub(zero, arg_b),
+                                             arg_b)
+                    quo, rem = zero, zero
+                    for bit in range(expr.size - 1, -1, -1):
+                        cur = builder.and_(builder.lshr(num, itype(bit)), one)
+                        rem = builder.or_(builder.shl(rem, one), cur)
+                        ge = builder.icmp_unsigned(">=", rem, den)
+                        rem = builder.select(ge, builder.sub(rem, den), rem)
+                        quo = builder.select(
+                            ge, builder.or_(quo, itype(1 << bit)), quo
+                        )
+                    if signed:
+                        quo = builder.select(builder.xor(neg_a, neg_b),
+                                             builder.sub(zero, quo), quo)
+                        rem = builder.select(neg_a, builder.sub(zero, rem),
+                                             rem)
+                    ret = quo if op in ("udiv", "sdiv") else rem
+                    self.update_cache(expr, ret)
+                    return ret
+
                 if op == "smod":
                     callback = builder.srem
                 elif op == "sdiv":
