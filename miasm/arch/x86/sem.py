@@ -7535,7 +7535,14 @@ class Lifter_X86_16(Lifter):
         fixed = {df: m2_expr.ExprInt(0, 1)}
 
         def fix(expr):
-            return expr_simp(expr.replace_expr(fixed))
+            new_expr = expr.replace_expr(fixed)
+            if new_expr == expr:
+                # Not reading df: keep the expression as is. Simplifying it
+                # would merge the slices of the partial assignments (PCMPGTW
+                # XMM0, XMM1 writes XMM0[0:16], XMM0[16:32], ...), which are
+                # then no more recognized when they are gathered
+                return expr
+            return expr_simp(new_expr)
 
         instr_ir = [m2_expr.ExprAssign(assign.dst, fix(assign.src))
                     for assign in instr_ir]
