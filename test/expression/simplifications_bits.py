@@ -446,4 +446,41 @@ symbexec = run_block([
 result = expr_simp_bits(symbexec.eval_expr(regs.RDX))
 assert result == regs.RCX ^ ExprInt(-1, 64)
 
+# Operations on 32 bit values written with 64 bit registers
+a64 = a.zeroExtend(64)
+C1 = ExprInt(0x1E991C1A, 64)
+C2 = ExprInt(0xFFFFFFFFF8A37C63, 64)
+# (a | c) - (a & c) on zero extended values, low half kept
+xor1 = (a64 | C1) - (a & ExprInt(0x1E991C1A, 32)).zeroExtend(64)
+assert expr_simp_bits(xor1[0:32]) == expr_simp_bits(a ^ ExprInt(0x1E991C1A, 32))
+# the same identity applied twice, as the obfuscated code does
+xor2 = ((xor1 | C2) - (xor1 & C2))[0:32]
+assert expr_simp_bits(xor2) == expr_simp_bits(a ^ ExprInt(0x1E991C1A ^ 0xF8A37C63, 32))
+# sign extension, multiplication, low half
+sext_mul = ExprCond(a.msb(), ExprCompose(a, ExprInt(0xFFFFFFFF, 32)),
+                    ExprCompose(a, ExprInt(0, 32))) * ExprInt(0x3A6D2CF7, 64)
+assert expr_simp_bits(sext_mul[0:32]) == expr_simp_bits(a * ExprInt(0x3A6D2CF7, 32))
+# addition and negation
+assert expr_simp_bits((a64 + b.zeroExtend(64))[0:32]) == expr_simp_bits(a + b)
+assert expr_simp_bits((-a64)[0:32]) == expr_simp_bits(-a)
+# bitwise operations at any position
+assert expr_simp_bits((a ^ b)[8:16]) == expr_simp_bits(a[8:16] ^ b[8:16])
+# a slice that does not start at bit 0 must not be pushed into a sum
+assert expr_simp_bits((a + b)[8:16]) == (a + b)[8:16]
+
+# A value split with complementary masks and added back
+split = (a & ExprInt(0xFEDC5C6F, 32)) + (a & ExprInt(0x0123A390, 32))
+assert expr_simp_bits(split) == a
+assert expr_simp_bits(split ^ ExprInt(0x745E0537, 32)) == expr_simp_bits(a ^ ExprInt(0x745E0537, 32))
+# masks that do not cover everything
+part = (a & ExprInt(0xFF00, 32)) + (a & ExprInt(0x00F0, 32))
+assert expr_simp_bits(part) == expr_simp_bits(a & ExprInt(0xFFF0, 32))
+# overlapping masks: a carry is possible, nothing may change
+over = (a & ExprInt(0xFF00, 32)) + (a & ExprInt(0x0F00, 32))
+assert "|" not in str(expr_simp_bits(over))
+# halves of a value, one of them written as a compose
+halves = (a & ExprInt(0xFEDC5C6F, 32)) + ExprCompose(
+    a[0:16] & ExprInt(0xA390, 16), a[16:32] & ExprInt(0x0123, 16))
+assert expr_simp_bits(halves) == a
+
 print("OK")

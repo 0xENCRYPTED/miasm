@@ -115,10 +115,13 @@ class ExpressionSimplifier(ExprVisitorCallbackBottomToTop):
             simplifications_bits.simp_mask_to_cond,
             simplifications_bits.simp_shift_add_mul,
             simplifications_bits.simp_bit_predicate_op,
+            simplifications_bits.simp_add_disjoint,
+            simplifications_bits.simp_or_masks,
         ],
         m2_expr.ExprSlice: [
             simplifications_bits.simp_slice_signext_bit,
             simplifications_bits.simp_slice_cond,
+            simplifications_bits.simp_slice_arith,
             simplifications_bits.simp_bit_predicate_slice,
         ],
         m2_expr.ExprCompose: [

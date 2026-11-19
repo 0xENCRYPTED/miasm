@@ -119,6 +119,128 @@ def simp_slice_cond(_, expr):
                     arg.src2[expr.start:expr.stop])
 
 
+def _maybe_ones(expr, depth=0):
+    """Mask of the bits of @expr that can be set (an over-approximation)"""
+    full = int(expr.mask)
+    if expr.is_int():
+        return int(expr)
+    if depth > 12:
+        return full
+    if expr.is_compose():
+        out, shift = 0, 0
+        for arg in expr.args:
+            out |= _maybe_ones(arg, depth + 1) << shift
+            shift += arg.size
+        return out
+    if expr.is_slice():
+        return (_maybe_ones(expr.arg, depth + 1) >> expr.start) & full
+    if expr.is_cond():
+        return (_maybe_ones(expr.src1, depth + 1) |
+                _maybe_ones(expr.src2, depth + 1))
+    if expr.is_op():
+        op, args = expr.op, expr.args
+        if op == "&":
+            out = full
+            for arg in args:
+                out &= _maybe_ones(arg, depth + 1)
+            return out
+        if op in ("|", "^"):
+            out = 0
+            for arg in args:
+                out |= _maybe_ones(arg, depth + 1)
+            return out
+        if op in ("<<", ">>") and len(args) == 2 and args[1].is_int():
+            sub = _maybe_ones(args[0], depth + 1)
+            count = int(args[1])
+            if count >= expr.size:
+                return 0
+            return ((sub << count) & full) if op == "<<" else (sub >> count)
+    return full
+
+
+def simp_add_disjoint(_, expr):
+    """Sum of values that have no bit in common
+    (a & 0xFF00) + (a & 0x00FF) => (a & 0xFF00) | (a & 0x00FF)
+    {x, 0} + {0, y} => {x, 0} | {0, y}
+
+    No carry can occur, so the addition is a bitwise or. The or is then
+    merged by the usual rules (see simp_or_masks).
+    """
+    if expr.op != "+" or expr.size == 1 or len(expr.args) < 2:
+        return expr
+    args = list(expr.args)
+    masks = [_maybe_ones(arg) for arg in args]
+    full = int(expr.mask)
+    for i in range(len(args)):
+        if masks[i] == full:
+            continue
+        for j in range(i + 1, len(args)):
+            if masks[j] == full or masks[i] & masks[j]:
+                continue
+            merged = args[i] | args[j]
+            rest = [arg for k, arg in enumerate(args) if k not in (i, j)]
+            if not rest:
+                return merged
+            return ExprOp("+", *(rest + [merged]))
+    return expr
+
+
+def simp_or_masks(_, expr):
+    """Parts of the same value put back together
+    (a & c1) | (a & c2) => a & (c1 | c2)
+    """
+    if expr.op != "|" or len(expr.args) < 2:
+        return expr
+    args = list(expr.args)
+    for i in range(len(args)):
+        first = args[i]
+        if not (first.is_op("&") and len(first.args) == 2 and
+                first.args[1].is_int()):
+            continue
+        for j in range(i + 1, len(args)):
+            second = args[j]
+            if not (second.is_op("&") and len(second.args) == 2 and
+                    second.args[1].is_int() and
+                    second.args[0] == first.args[0]):
+                continue
+            mask = int(first.args[1]) | int(second.args[1])
+            base = first.args[0]
+            merged = base if mask == int(expr.mask) else (
+                base & ExprInt(mask, expr.size))
+            rest = [arg for k, arg in enumerate(args) if k not in (i, j)]
+            if not rest:
+                return merged
+            return ExprOp("|", *(rest + [merged]))
+    return expr
+
+
+def simp_slice_arith(_, expr):
+    """Narrow an operation to the bits that are actually kept
+    (a ^ b)[x:y] => a[x:y] ^ b[x:y]            (also & and |)
+    (a + b)[0:n] => a[0:n] + b[0:n]            (also * and unary -)
+
+    The low n bits of a sum, of a product or of a negation only depend on the
+    low n bits of the operands. Code working on 32 bit values held in 64 bit
+    registers is written as 64 bit operations on zero / sign extended values
+    whose low half is then taken: this brings it back to 32 bit operations,
+    where the arithmetic identities can be recognized.
+    """
+    arg = expr.arg
+    # Slices of a few bits are left alone: the bit-serial recognizers
+    # (simp_compose_arith, ...) work on the single bits of a whole operation
+    if not arg.is_op() or expr.size < 8:
+        return expr
+    op = arg.op
+    if op in ("^", "&", "|"):
+        pass
+    elif expr.start == 0 and (op in ("+", "*") or
+                              (op == "-" and len(arg.args) == 1)):
+        pass
+    else:
+        return expr
+    return ExprOp(op, *[sub[expr.start:expr.stop] for sub in arg.args])
+
+
 def simp_cond_signext(_, expr):
     """msb(X) ? {X, -1} : {X, 0} => signExt(X)"""
     src1, src2 = expr.src1, expr.src2
