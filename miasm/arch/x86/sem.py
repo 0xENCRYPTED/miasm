@@ -7520,6 +7520,10 @@ class Lifter_X86_16(Lifter):
                                                                       loc_do_expr)))
         cond_bloc = IRBlock(self.loc_db, loc_end, [AssignBlock(cond_bloc, instr)])
         e_do = instr_ir
+        if not any(assign.dst == self.IRDst for assign in e_do):
+            # Body without flow change (flattened internal branches): it has
+            # to go back to the counter test, not to fall through
+            e_do = list(e_do) + [m2_expr.ExprAssign(self.IRDst, loc_end_expr)]
 
         c = IRBlock(self.loc_db, loc_do, [AssignBlock(e_do, instr)])
         e_n = [m2_expr.ExprAssign(self.IRDst, m2_expr.ExprCond(c_reg, loc_do_expr,
