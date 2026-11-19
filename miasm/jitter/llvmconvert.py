@@ -1025,11 +1025,29 @@ class LLVMFunction(object):
                 expr_size = itype(expr.size)
 
                 # As shift of expr_size is undefined, we urem the shifters
-                shift = builder.urem(count, expr_size)
-                shift_inv = builder.urem(
-                    builder.sub(expr_size, shift),
-                    expr_size
-                )
+                if expr.size > 64:
+                    # A division on more than 64 bits (RCL / RCR on a 64 bit
+                    # operand rotate 65 bits) is lowered to a call to the
+                    # compiler runtime (__umodti3), which is not available
+                    # to the JIT: the generated code crashes. The modulus is
+                    # computed on 64 bits instead (the count is assumed to
+                    # fit, which holds for the x86 rotations)
+                    i64 = LLVMType.IntType(64)
+                    size_64 = i64(expr.size)
+                    shift_64 = builder.urem(builder.trunc(count, i64),
+                                            size_64)
+                    shift_inv_64 = builder.urem(
+                        builder.sub(size_64, shift_64),
+                        size_64
+                    )
+                    shift = builder.zext(shift_64, itype)
+                    shift_inv = builder.zext(shift_inv_64, itype)
+                else:
+                    shift = builder.urem(count, expr_size)
+                    shift_inv = builder.urem(
+                        builder.sub(expr_size, shift),
+                        expr_size
+                    )
 
                 if op == '<<<':
                     part_a = builder.shl(value, shift)
