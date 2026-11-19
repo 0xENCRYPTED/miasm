@@ -392,15 +392,27 @@ class ExprVisitorCallbackBottomToTop(ExprVisitorBase):
     Rebuild expression by visiting sub-expressions
     Call @callback from leaves to root expressions
     """
+    # Upper bound on the number of memoised results (None: unbounded, the
+    # historical behaviour). The memo table holds a strong reference to every
+    # expression ever visited and to its result, so on a long-lived visitor
+    # (expr_simp, canonize_visitor are module-level singletons) it only grows:
+    # a symbolic execution of a few hundred thousand instructions ends up
+    # with gigabytes of expressions nothing else refers to. The table is a
+    # pure cache: dropping it only costs recomputation.
+    CACHE_MAX = 1 << 20
+
     def __init__(self, callback):
         super(ExprVisitorCallbackBottomToTop, self).__init__()
         self.cache = dict()
         self.callback = callback
 
     def visit(self, expr, *args, **kwargs):
-        if expr in self.cache:
-            return self.cache[expr]
+        ret = self.cache.get(expr)
+        if ret is not None:
+            return ret
         ret = self.visit_inner(expr, *args, **kwargs)
+        if self.CACHE_MAX is not None and len(self.cache) >= self.CACHE_MAX:
+            self.cache.clear()
         self.cache[expr] = ret
         return ret
 
