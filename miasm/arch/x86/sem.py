@@ -3298,11 +3298,21 @@ def ins(_, instr, size):
     return e, []
 
 
+SIDT_BASE_64 = 0xFFFFF80608000000
+
+
 def sidt(ir, instr, dst):
     e = []
     if not isinstance(dst, m2_expr.ExprMem) or dst.size != 32:
         raise ValueError('not exprmem 32bit instance!!')
     ptr = dst.ptr
+    if instr.mode == 64:
+        # 64-bit SIDT stores a 10-byte descriptor: u16 limit, u64 base. The base is a fixed
+        # kernel-range constant (SIDT_BASE_64) that a harness can map an IDT at.
+        e.append(m2_expr.ExprAssign(ir.ExprMem(ptr, 16), m2_expr.ExprInt(0xFFF, 16)))
+        e.append(m2_expr.ExprAssign(ir.ExprMem(ptr + m2_expr.ExprInt(2, ptr.size), 64),
+                                    m2_expr.ExprInt(SIDT_BASE_64, 64)))
+        return e, []
     LOG_X86_SEM.warning("DEFAULT SIDT ADDRESS %s!!", dst)
     e.append(m2_expr.ExprAssign(ir.ExprMem(ptr, 32),
                              m2_expr.ExprInt(0xe40007ff, 32)))
