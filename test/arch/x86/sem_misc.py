@@ -123,6 +123,14 @@ for line in FLATTENED:
         state = random_state()
         assert run(lifter_ref, ircfg_ref, state) == \
             run(lifter_flat, ircfg_flat, state), line
+    if line.startswith("BS"):
+        # Null source: the destination is left alone, with its upper half
+        # (a 32 bit destination must not be zero extended)
+        state = random_state()
+        state[regs.RBX] = ExprInt(0, 64)
+        ref = run(lifter_ref, ircfg_ref, state)
+        assert ref == run(lifter_flat, ircfg_flat, state), line
+        assert ref[regs.RAX] == int(state[regs.RAX]), line
 print("flatten_internal_branches: OK")
 
 for line in ["MOVSB", "MOVSQ", "STOSB", "STOSQ", "LODSB", "SCASB", "CMPSB"]:

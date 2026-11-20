@@ -7639,6 +7639,23 @@ class Lifter_X86_16(Lifter):
         for dst in dsts:
             default = main.get(dst, dst)
             values = [branch.get(dst, default) for branch in branches]
+            if (cond is not None and instr.mode == 64 and dst not in main and
+                    dst.is_id() and dst.size == 32 and
+                    dst in replace_regs[64] and
+                    any(dst not in branch for branch in branches) and
+                    any(dst in branch for branch in branches)):
+                # A branch leaves the 32 bit register alone (BSF / BSR with a
+                # null source): there the whole 64 bit register is kept.
+                # "EBX = cond ? value : EBX" would zero extend it in both cases
+                full = replace_regs[64][dst].arg
+                values = [
+                    branch[dst].zeroExtend(64) if dst in branch else full
+                    for branch in branches
+                ]
+                out.append(m2_expr.ExprAssign(
+                    full, m2_expr.ExprCond(cond, values[0], values[1])
+                ))
+                continue
             if cond is None or values[0] == values[1]:
                 value = values[0]
             else:
