@@ -998,6 +998,10 @@ def simp_cmp_int(expr_simp, expr):
         # ({X, 0} == int) => X == int[:]
         src = expr.args[0].args[0]
         int_val = int(expr.args[1])
+        if int_val >> src.size:
+            # The upper part of {X, 0} is zero: it never equals an integer
+            # with a bit set there
+            return ExprInt(0, 1)
         new_int = ExprInt(int_val, src.size)
         expr = expr_simp(
             ExprOp(TOK_EQUAL, src, new_int)

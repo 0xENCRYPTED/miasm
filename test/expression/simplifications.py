@@ -515,9 +515,20 @@ to_test = [
     (ExprOp(TOK_INF_SIGNED, a+i2, i1), ExprOp(TOK_INF_SIGNED, a+i2, i1)),
     (ExprOp(TOK_INF_UNSIGNED, a+i2, i1), ExprOp(TOK_INF_UNSIGNED, a+i2, i1)),
 
+    # {X, 0} == int: the upper part is zero, so an integer with a bit set
+    # there is never equal (0x000000XX is not 0xFFFFFFFF, whatever XX is)
     (
         ExprOp(TOK_EQUAL, ExprCompose(a8, ExprInt(0, 24)), im1),
+        ExprInt(0, 1)
+    ),
+    (
+        ExprOp(TOK_EQUAL, ExprCompose(a8, ExprInt(0, 24)), ExprInt(0xFF, 32)),
         ExprOp(TOK_EQUAL, a8, ExprInt(0xFF, 8))
+    ),
+    # ZF of (zero-extended byte + 0x100): never set
+    (
+        ExprCond(ExprCompose(a8, ExprInt(0, 24)) + ExprInt(0x100, 32), ExprInt(0, 1), ExprInt(1, 1)),
+        ExprInt(0, 1)
     ),
 
     (
