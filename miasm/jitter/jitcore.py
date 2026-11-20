@@ -56,6 +56,10 @@ class JitCore(object):
         # Logging & options
         self.log_mn = False
         self.log_regs = False
+        # Keep the memory access log across instructions instead of clearing it
+        # after each one: the caller reads it (vm.get_memory_read/write) and
+        # clears it (vm.reset_memory_access) itself. LLVM backend only.
+        self.keep_mem_access = False
         self.log_newbloc = False
         self.options = {"jit_maxline": 50,  # Maximum number of line jitted
                         "max_exec_per_call": 0 # 0 means no limit
@@ -292,7 +296,10 @@ class JitCore(object):
                 self.arch_name.encode(),
                 b'\x01' if self.log_mn else b'\x00',
                 b'\x01' if self.log_regs else b'\x00',
-                block_raw
+                # (code built with keep_mem_access differs: its own cache
+                # entries; without the option the hash is what it was, so
+                # existing caches stay valid)
+                (b'keep_mem_access_' if self.keep_mem_access else b'') + block_raw
             )
         ).hexdigest()
         return block_hash

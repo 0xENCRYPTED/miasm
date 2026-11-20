@@ -110,6 +110,7 @@ class JitCore_LLVM(jitcore.JitCore):
             # Set log level
             func.log_regs = self.log_regs
             func.log_mn = self.log_mn
+            func.keep_mem_access = self.keep_mem_access
 
             # Import asm block
             func.from_asmblock(block)

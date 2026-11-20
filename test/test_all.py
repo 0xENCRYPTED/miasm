@@ -490,6 +490,11 @@ for script in ["jitload.py",
     for engine in ArchUnitTest.jitter_engines:
         testset += RegressionTest([script, engine], base_dir="jitter",
                                   tags=[TAGS.get(engine,None)])
+for script in ["keep_mem_access.py"]:
+    # (option of the LLVM backend only)
+    for engine in ["llvm"]:
+        testset += RegressionTest([script, engine], base_dir="jitter",
+                                  tags=[TAGS.get(engine,None)])
 
 
 # Examples

@@ -525,6 +525,8 @@ class LLVMFunction(object):
     # Default logging values
     log_mn = False
     log_regs = True
+    # Do not clear the memory access log after each instruction
+    keep_mem_access = False
 
     # Operation translation
     ## Basics
@@ -1574,7 +1576,7 @@ class LLVMFunction(object):
         if attrib.set_exception:
             self.check_cpu_exception(next_instr, restricted_exception=False)
 
-        if attrib.mem_read | attrib.mem_write:
+        if (attrib.mem_read | attrib.mem_write) and not self.keep_mem_access:
             fc_ptr = self.mod.get_global("reset_memory_access")
             self.builder.call(fc_ptr, [self.local_vars["vmmngr"]])
 
